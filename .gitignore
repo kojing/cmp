@@ -1,0 +1,4 @@
+out/
+baked/
+__pycache__/
+*.pyc
