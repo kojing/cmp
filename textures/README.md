@@ -1,0 +1,18 @@
+# シェーダーで使うテクスチャ (サンプルの街)
+
+`shader/city_tile_fn.glsl` がそのまま読める形にチャンネルを格納した、タイル A / B のテクスチャです。
+デモ (`demo/city_polytile.html`) に埋め込んであるものと同じ中身です。
+
+- タイルは 2 種類。横に A B A B … と並べ、縦は同じタイルが続く (ミラーなし)
+- 大きさ:1408 × 1408 = コア 1024 + 片側マージン 192 (cone だけ 704 × 704)
+- 高さは 4 の倍数、マージンは 8 の倍数 (ASTC 4x4 のブロックがそろう)
+
+| ファイル | サンプラー | チャンネル | 設定 |
+|---|---|---|---|
+| `tile?_data.png` | `uCityData` | R 下端の高さ (255 = 空き地) / G 上端の高さ / B 境界までの距離 (1 テクセルあたり 2) | NEAREST、ミップなし、リニア |
+| `tile?_roof.png` | `uCityRoof` | RGB 屋根の色 (建物の外は一番近い屋根の色で埋めてある) | LINEAR、ミップあり、sRGB 可 |
+| `tile?_ground.png` | `uCityGround` | RGB 地面の色。建物の中 (輪郭の 1.5 テクセル内側) は壁の色 | LINEAR、ミップあり、sRGB 可 |
+| `tile?_cone.png` | `uCityCone` | 1 チャンネル。円錐ステップ値 | NEAREST、ミップなし、リニア |
+| `tile?_outline.png` | `uCityOutline` | 1 チャンネル。なめらかな輪郭 (0.5 = 輪郭) | LINEAR、ミップなし、リニア |
+
+ラップはどれも CLAMP。シェーダーの定数は `CORE = 1024`、`DIST_SCALE = 2`、`CONE_MAP_W = 2048` です。
