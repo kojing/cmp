@@ -14,7 +14,7 @@ city_bake.py ― 高さの画像と建物マスクから、cityTile() 用の各�
   data_R.png    下端の高さ (255 = 空き地)                → data テクスチャの R
   data_G.png    上端の高さ (4 の倍数)                    → data テクスチャの G
   data_B.png    同じ高さの領域の境界までの距離            → data テクスチャの B
-  roof_A.png    なめらかな輪郭 (0.5 = 輪郭)               → roof テクスチャの A
+  outline.png   なめらかな輪郭 (0.5 = 輪郭)               → outline テクスチャ (1 チャンネル)
   cone.png      円錐ステップ値 (半分の解像度)             → cone テクスチャ (R8)
   wall_mask.png 地面テクスチャに壁の色を置く範囲 (白)     → ground の RGB を作るときの目安
   roof_RGB.png  建物の外を埋めた屋根の色 (--roof のとき)  → roof テクスチャの RGB
@@ -287,7 +287,7 @@ def main(argv=None):
     ap.add_argument('--out', default='baked')
     ap.add_argument('--wrap', action='store_true', help='マップが上下左右にそのまま繰り返してつながる (距離をまたいで計算する)')
     ap.add_argument('--dist-scale', type=float, default=2.0, help='B が 1 テクセルあたりいくつ増えるか (既定 2 → 最大 127.5 テクセル)')
-    ap.add_argument('--alpha-width', type=float, default=2.0, help='roof_A が 0→1 に変わる片側の幅 (テクセル、既定 2)')
+    ap.add_argument('--alpha-width', type=float, default=2.0, help='outline が 0→1 に変わる片側の幅 (テクセル、既定 2)')
     ap.add_argument('--upsample', type=int, default=4, help='輪郭を求めるときの拡大率 (既定 4)')
     ap.add_argument('--cone-scale', type=int, default=2, help='円錐マップの縮小率 (既定 2 = 半分の解像度)')
     ap.add_argument('--cone-reach', type=int, default=256, help='円錐で探す距離 (縮小後のテクセル、既定 256)')
@@ -363,11 +363,11 @@ def main(argv=None):
     kf = np.where(np.isinf(kmin), 0.0, kmin)
     cone = np.where(np.isinf(kmin), 254, np.minimum(np.floor(255 * kf / (kf + 0.1)), 254))
 
-    # ---- 6. roof の A (なめらかな輪郭) と、壁の色を置く範囲 ----
+    # ---- 6. 輪郭 (outline、1 チャンネル) と、壁の色を置く範囲 ----
     A = np.clip(0.5 - sd / (2 * a.alpha_width), 0, 1) * 255
     wall = (sd < -1.5) & (R == 0)                                        # 地面から立つ物の、輪郭より 1.5 テクセル内側
 
-    outs = {'data_R': R, 'data_G': G, 'data_B': B, 'roof_A': A, 'cone': cone, 'wall_mask': wall * 255}
+    outs = {'data_R': R, 'data_G': G, 'data_B': B, 'outline': A, 'cone': cone, 'wall_mask': wall * 255}
 
     # ---- 7. 屋根の色:建物の外を一番近い屋根の色で埋める (ミップと ASTC で縁がにじまないように) ----
     if a.roof:

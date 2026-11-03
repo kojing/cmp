@@ -24,9 +24,9 @@ for t in 'AB':
       lab(gray(d[...,2]),'data B:境界までの距離','同じ高さの領域の境目まで (2 / テクセル)'),
       lab(gray(c).resize((C+2*M,C+2*M)),'cone (半分の解像度)','円錐ステップ値。暗いほど近くに高い建物'),
       lab(Image.fromarray(r[...,:3]),'roof RGB:屋根の色','建物の外は一番近い屋根の色で埋めてある'),
-      lab(gray(r[...,3]),'roof α:なめらかな輪郭','0.5 の所が輪郭 (±2 テクセルで 0→1)'),
+      lab(gray(r[...,3]),'outline:なめらかな輪郭','1 チャンネル。0.5 の所が輪郭 (±2 テクセルで 0→1)'),
       lab(g,'ground:地面 + 壁の色','建物の中 (輪郭の 1.5 テクセル内側) は壁の色'),
-      lab(comp,'真上から見た合成','ground の上に roof (α ≥ 0.5) を重ねたもの')]
+      lab(comp,'真上から見た合成','ground の上に roof (outline ≥ 0.5) を重ねたもの')]
     sheet=Image.new('RGB',(4*(T+12)+12, 2*(T+78+12)+72),(22,28,31)); dd=ImageDraw.Draw(sheet)
     dd.text((14,12),f'タイル {t} のテクスチャ (1408 × 1408 = コア 1024 + 片側マージン 192。黄色の破線がコア = ポリゴンに映る範囲)',font=F,fill=(235,238,236))
     for i,p in enumerate(panels): sheet.paste(p,(12+(i%4)*(T+12), 72+(i//4)*(T+78+12)))

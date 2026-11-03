@@ -44,7 +44,7 @@ python3 city_bake.py --top top.png --mask mask.png --bottom bottom.png --roof ro
 | `--core` | なし | タイルのコアの幅 (ポリゴンに映る範囲)。付けると `tiles/` にタイルごとの画像も作る |
 | `--margin` | 0 | タイルの片側マージン |
 | `--dist-scale` | 2 | B が 1 テクセルあたりいくつ増えるか (2 なら最大 127.5 テクセル) |
-| `--alpha-width` | 2 | roof_A が 0 → 1 に変わる片側の幅 (テクセル) |
+| `--alpha-width` | 2 | outline が 0 → 1 に変わる片側の幅 (テクセル) |
 | `--upsample` | 4 | 輪郭を求めるときの拡大率 |
 | `--cone-scale` | 2 | 円錐マップの縮小率 (2 = 半分の解像度) |
 | `--cone-reach` | 256 | 円錐で高い建物を探す距離 (縮小後のテクセル)。これより遠くは「この距離にある」とみなす (安全側) |
@@ -60,7 +60,7 @@ ASTC 4x4 で圧縮する場合、`--core` は 4 の倍数、`--margin` は 4 × 
 | `data_G.png` | data の G | 上端の高さ (4 の倍数) |
 | `data_B.png` | data の B | 同じ高さの領域の境界までの距離 |
 | `roof_RGB.png` | roof の RGB | 建物の外を一番近い屋根の色で埋めた屋根の色 (`--roof` のとき) |
-| `roof_A.png` | roof の A | なめらかな輪郭 (0.5 = 輪郭) |
+| `outline.png` | outline (1 チャンネル) | なめらかな輪郭 (0.5 = 輪郭)。**ほかのチャンネルと一緒にしないこと** (下の「ASTC」) |
 | `cone.png` | cone (1 チャンネル) | 円錐ステップ値 (`--cone-scale` 分の 1 の解像度) |
 | `ground_RGB.png` | ground の RGB | `--ground` をそのまま (タイルに切り出すため) |
 | `wall_mask.png` | (ground を作るときの目安) | 白の範囲に壁の色を置く。輪郭より 1.5 テクセル内側の、地面から立つ物の中 |
@@ -76,12 +76,12 @@ ground テクスチャは手で作ります。地面の色を描き、`wall_mask
 
 ポリゴンに映る建物のうち、視差で隣のタイルから倒れ込んでくるものは、マージンの中にあるデータで描きます。
 そのため data と cone だけでなく、roof と ground にも同じマージンが要ります。
-シェーダーも 4 枚が同じ並び (コア + 片側マージン) である前提で読んでいます。
+シェーダーも 5 枚が同じ並び (コア + 片側マージン) である前提で読んでいます。
 
 | テクスチャ | マージンで使われるもの | 必要な幅 (片側) |
 |---|---|---|
 | data / cone | 倒れ込んでくる建物の形、隣から伸びる影 | 視差と影の大きい方 |
-| roof | 倒れ込んでくる建物の屋根の色、輪郭 (α) | 視差 |
+| roof / outline | 倒れ込んでくる建物の屋根の色と輪郭 | 視差 |
 | ground | 倒れ込んでくる建物の壁の色 (建物の中に置いてある) | 視差 |
 
 並びをそろえるため、ツールはどれも同じマージンで切り出します。
@@ -92,21 +92,33 @@ ground テクスチャは手で作ります。地面の色を描き、`wall_mask
 |---|---|---|---|
 | data (RGB) | NEAREST | なし | リニア |
 | cone (R) | NEAREST | なし | リニア |
-| roof (RGBA) | LINEAR | あり | RGB は sRGB でよい。A は輪郭なのでリニアのまま読まれること |
+| roof (RGB) | LINEAR | あり | sRGB でよい |
+| outline (R) | LINEAR | なし | リニア |
 | ground (RGB) | LINEAR | あり | sRGB でよい |
 
 ラップはどれも CLAMP にします (マージンがあるので繰り返しは不要)。
+data / cone / outline は **sRGB にしない** でください。値がそのまま読まれる前提で、sRGB で読まれると高さも距離も輪郭も別の値になります。
+
+## ASTC 4x4
+
+- **outline は 1 チャンネルだけのテクスチャにします。** 以前は roof の A に入れていましたが、ASTC はブロックの全チャンネルをまとめて圧縮するので、
+  屋根の色に模様があると輪郭が引きずられてずれます。模様のある屋根で測ると、roof の A では輪郭が最大 0.9 テクセル (99% で 0.36) ずれました。
+  1 チャンネルだけなら最大 0.08 テクセル (99% で 0.03) です。
+- data (RGB) は 1 枚のまま圧縮してかまいません。高さは 4 の倍数なので ±1 のずれはシェーダーで丸めて戻せます。
+  距離 B と cone は、大きく戻った所で建物を飛び越さないように、シェーダーが 6 コード小さく読みます (実測の超過は最大 3 コード)。
+- data に別のチャンネル (輪郭や cone) を足して RGBA にすると、高さの誤差が ±12 程度に増えて丸めで戻せなくなります。足さないでください。
+- コアとマージンを 4 の倍数 (cone が半分なら 8 の倍数) にすると、隣のタイルとの重なりが同じ値に戻ります。
 
 ## シェーダー側
 
 `city_tile_fn.glsl` の `cityTile(screenUV, polyUV)` を使います。
 
-1. サンプラーは外のコードで `uCityData` / `uCityRoof` / `uCityGround` / `uCityCone` の名前で宣言します。名前が違う場合は、glsl の中のこの 4 つの名前を一括置換します (glsl の中に `#define` はありません)。
+1. サンプラーは外のコードで `uCityData` / `uCityRoof` / `uCityGround` / `uCityCone` / `uCityOutline` の名前で宣言します。名前が違う場合は、glsl の中のこの 5 つの名前を一括置換します (glsl の中に `#define` はありません)。
 2. 関数の先頭の「調整する値」(画角、光の向き、建物の高さ、フラグ) をシーンに合わせて書き換えます。
 3. 「定数」の `CORE` / `DIST_SCALE` / `CONE_MAP_W` を `bake_info.txt` の値に合わせます。
 
 ```glsl
-uniform sampler2D uCityData, uCityRoof, uCityGround, uCityCone;   // 外のコードでの宣言
+uniform sampler2D uCityData, uCityRoof, uCityGround, uCityCone, uCityOutline;   // 外のコードでの宣言
 #include "city_tile_fn.glsl"                                      // (または中身を貼り付ける)
 
 in vec2 vPolyUV;                 // ポリゴンの UV (0..1、コアの範囲)

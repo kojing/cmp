@@ -10,14 +10,17 @@
 //     ズーム (1 ピクセルあたりのテクセル数) がわかる → ズームはポリゴンの拡大縮小だけでよい。
 //   ・視点は画面に固定:画面の (0.5, 0.5 + EYE_OFFSET / 2) の真上、高さは画角で決まる。
 //   ・それ以外の値 (画角・光・建物の高さ・フラグ) は関数の中の変数。サンプラーだけは外のコードで宣言する。
-//   ・ポリゴンごとにそのタイルのテクスチャ 4 枚をバインドする (テクスチャ配列は使わない)。
+//   ・ポリゴンごとにそのタイルのテクスチャ 5 枚をバインドする (テクスチャ配列は使わない)。
 //
 // テクスチャ (コアの周りに片側 MARGIN を足して切り出したもの。幅 S = CORE + 2 × MARGIN)
 //   data   (RGBA8, NEAREST)  R = 下端の高さ (0 / 56 = 高架 / 255 = 空き地) / G = 上端 (4 の倍数) /
 //                            B = 同じ高さ領域の境界までの距離 (1 テクセルあたり DIST_SCALE)
-//   roof   (RGBA, ミップあり) 屋根のアルベド。α = なめらかな輪郭:符号付き距離 sd (内側が負) から
-//                            α = 0.5 − sd / 4。線形補間した α = 0.5 を輪郭として使う (テクセルより細かい)。
-//                            data のほうは輪郭に少しでもかかるテクセルを建物にしておく (外側 0.75 テクセルまで)
+//   roof   (RGB,  ミップあり) 屋根のアルベド (建物の外は一番近い屋根の色で埋めておく)
+//   outline(R8,   LINEAR、ミップなし) なめらかな輪郭:符号付き距離 sd (内側が負) から
+//                            v = 0.5 − sd / 4。線形補間した v = 0.5 を輪郭として使う (テクセルより細かい)。
+//                            data のほうは輪郭に少しでもかかるテクセルを建物にしておく (外側 0.75 テクセルまで)。
+//                            ASTC では 1 チャンネルだけのテクスチャにすること。色と一緒に圧縮すると
+//                            色の模様に引きずられて輪郭がずれる (実測で最大 0.9 テクセル → 1 チャンネルなら 0.1 以下)
 //   ground (RGB,  ミップあり) 地面のアルベド。地面から立つ建物の中 (R=0) は壁の色
 //   cone   (R8, NEAREST、data の半分の解像度でよい)
 //                            u = k / (k + 0.1)、k = 自分より高い建物までの水平距離 ÷ 高さの差
@@ -31,15 +34,18 @@
 //   ・CORE とマージンは 4 の倍数 (cone が半分の解像度ならマージンは 8 の倍数)。
 //     ブロックがそろっていれば、隣のタイルとの重なりは同じ値に復元される。
 //   ・高さ (R/G) は 4 の倍数で作り、読むときに丸める。
-//   ・距離 B と円錐は 4 コード小さく読み、進む距離にだけ使う。
-//     当たった位置・法線・AO は R/G だけで決めるので、圧縮のノイズが絵に出ない。
+//   ・距離 B と円錐は 6 コード小さく読み、進む距離にだけ使う (実測の超過は最大 3 コード)。
+//     当たった位置・法線・AO は R/G と輪郭だけで決めるので、圧縮のノイズが絵に出ない。
+//   ・輪郭 (outline) は 1 チャンネルだけのテクスチャにする。
+//   ・data / cone / outline は sRGB にしないこと (値がそのまま読まれる前提)。
 // =============================================================
 
 // ---- サンプラー ----
-// この関数は次の 4 つのサンプラーを名前で参照する。宣言は外のコードで行う。
+// この関数は次の 5 つのサンプラーを名前で参照する。宣言は外のコードで行う。
 // 外のコードで名前が違う場合は、このファイルの中の名前を一括置換する
 //   uCityData   : data   R 下端 / G 上端 / B 境界までの距離 (NEAREST)
-//   uCityRoof   : roof   RGB 屋根の色 / A なめらかな輪郭 (LINEAR, ミップ)
+//   uCityRoof   : roof   RGB 屋根の色 (LINEAR, ミップ)
+//   uCityOutline: outline R なめらかな輪郭 (LINEAR, ミップなし)
 //   uCityGround : ground RGB 地面と壁の色 (LINEAR, ミップ)
 //   uCityCone   : cone   R 円錐ステップ値 (NEAREST)
 
@@ -53,7 +59,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
     float LIGHT_EL_DEG = 65.0;    // 光の高さ (度、地面からの角度)
     bool  DROP_SHADOW  = true;    // 落ち影 (地面だけ)
     bool  SIDE_SHADE   = true;    // 側面の陰影
-    bool  ASTC_SAFE    = true;    // ASTC 対策:距離 B と円錐を 4 コード小さく読む
+    bool  ASTC_SAFE    = true;    // ASTC 対策:距離 B と円錐を 6 コード小さく読む
     bool  HEIGHT_SNAP  = true;    // ASTC 対策:高さ R/G を 4 の倍数に丸めて読む
     bool  SHOW_STARVED = false;   // デバッグ:マージン不足の所を赤く
 
@@ -95,13 +101,13 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
     vec3  eye    = vec3(MARGIN + eyeUV * CORE, eyeH * texPerPx);   // 視点 (テクセル)
 
     // ---- ASTC 4x4 対策 ----
-    // 距離 B と円錐は「大きく復元」されると建物を飛び越えるので、4 コード小さく読む
+    // 距離 B と円錐は「大きく復元」されると建物を飛び越えるので、6 コード小さく読む
     //   (実測の超過は B 最大 2、円錐最大 3 コード。圧縮しないときは歩数が少し増えるだけ)
     // 高さ R/G は ±1 ずれる。data を 4 の倍数で作っておき、読むときに 4 の倍数へ丸めると元に戻る
     bool  safeRead = (flags & 8) != 0;
     float SNAP     = (flags & 16) != 0 ? 1.0 : 0.0;
-    float B_MARGIN = safeRead ? 4.0 / 255.0 : 0.0;
-    float C_MARGIN = safeRead ? 4.0 / 255.0 : 0.0;
+    float B_MARGIN = safeRead ? 6.0 / 255.0 : 0.0;
+    float C_MARGIN = safeRead ? 6.0 / 255.0 : 0.0;
     float KEY_TOL  = SNAP > 0.5 ? 0.5 / 255.0 : safeRead ? 1.5 / 255.0 : 0.5 / 255.0;
 
     float coneSc = float(textureSize(uCityCone, 0).x) / S.x;
@@ -139,7 +145,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
             if (solid) {
                 // data で中にいる時だけ、なめらかな輪郭 (屋根の α) を読む (毎ステップ読むと重い)
                 bool inData = p.z >= bot && p.z <= top;
-                if (inData) inData = textureLod(uCityRoof, p.xy / S, 0.0).a > 0.5;
+                if (inData) inData = textureLod(uCityOutline, p.xy / S, 0.0).r > 0.5;
                 if (inData) {                                                      // 中に入った (なめらかな輪郭の内側)
                     // 外側 (tPrev) と内側 (t) の間を二分法で詰めて、入った所を求める
                     float tA = tPrev, tB = t;
@@ -149,21 +155,21 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                         vec4  e  = texelFetch(uCityData, ivec2(clamp(floor(q.xy), vec2(0.0), S - 1.0)), 0);
                         e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
                         bool inside = e.r < EMPTY_R && q.z >= e.r * heightTex && q.z <= e.g * heightTex;
-                        if (inside) inside = textureLod(uCityRoof, q.xy / S, 0.0).a > 0.5;
+                        if (inside) inside = textureLod(uCityOutline, q.xy / S, 0.0).r > 0.5;
                         if (inside) tB = tm; else tA = tm;
                     }
                     // 入る直前の点の真下が建物 (屋根より上) なら屋根の面から、そうでなければ側面から入った
                     vec3 qa = eye + D * tA;
                     vec4 ea = texelFetch(uCityData, ivec2(clamp(floor(qa.xy), vec2(0.0), S - 1.0)), 0);
                     ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
-                    if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityRoof, (qa.xy) / S, 0.0).a > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
+                    if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityOutline, (qa.xy) / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
                     else                                           { face = 3; hit = eye + D * tB; }
                     break;
                 }
                 if (p.z > top) {                                                   // 屋根面に届くか
                     float tt = 1.0 - top / eye.z;
                     if (tt <= t + dt) {
-                        if (textureLod(uCityRoof, (eye.xy + D.xy * tt) / S, 0.0).a > 0.5) { face = 2; hit = eye + D * tt; break; }
+                        if (textureLod(uCityOutline, (eye.xy + D.xy * tt) / S, 0.0).r > 0.5) { face = 2; hit = eye + D * tt; break; }
                     }
                 }
                 // p.z < bot は高架の下をくぐる
@@ -171,7 +177,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
             float base = solid ? top : 0.0;                                        // 円錐ステップ
             if (p.z > base) {
                 float u = texelFetch(uCityCone, ivec2(clamp(floor(p.xy * coneSc), vec2(0.0), S * coneSc - 1.0)), 0).r;
-                // 254 以上は「高い建物なし」。安全読みでは 4 コード引くので、この特別扱いは起きない
+                // 254 以上は「高い建物なし」。安全読みでは 6 コード引くので、この特別扱いは起きない
                 u = u >= 253.5 / 255.0 && !safeRead ? 0.999 : max(u - C_MARGIN, 0.0);
                 float k = CONE_C * u / (1.0 - u) * CONE_MAP_W / heightTex;          // 水平距離 ÷ 高さ (テクセル同士)
                 dt = max(dt, k * (p.z - base) / (xyLen + k * eye.z));
@@ -193,7 +199,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
             vec4 e = texelFetch(uCityData, ivec2(clamp(floor(Ps), vec2(0.0), S - 1.0)), 0);
             e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
             bool groundIn = e.r < EMPTY_R && e.r * heightTex <= 0.5;               // 地面から立つ物の中
-            if (groundIn) groundIn = textureLod(uCityRoof, Ps / S, 0.0).a > 0.5;
+            if (groundIn) groundIn = textureLod(uCityOutline, Ps / S, 0.0).r > 0.5;
             if (groundIn) {
                 float tA = tPrev, tB = 1.0;
                 for (int k = 0; k < 10; k++) {
@@ -202,13 +208,13 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                     vec4  f  = texelFetch(uCityData, ivec2(clamp(floor(q.xy), vec2(0.0), S - 1.0)), 0);
                     f.rg = mix(f.rg, round(f.rg * 63.75) / 63.75, SNAP);
                     bool inside = f.r < EMPTY_R && q.z >= f.r * heightTex && q.z <= f.g * heightTex;
-                    if (inside) inside = textureLod(uCityRoof, q.xy / S, 0.0).a > 0.5;
+                    if (inside) inside = textureLod(uCityOutline, q.xy / S, 0.0).r > 0.5;
                     if (inside) tB = tm; else tA = tm;
                 }
                 vec3 qa = eye + D * tA;
                 vec4 ea = texelFetch(uCityData, ivec2(clamp(floor(qa.xy), vec2(0.0), S - 1.0)), 0);
                 ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
-                if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityRoof, qa.xy / S, 0.0).a > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
+                if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityOutline, qa.xy / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
                 else { face = 3; hit = eye + D * tB; }
             }
         }
@@ -231,8 +237,8 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
             }
             if (length(g) > 1e-5) n = normalize(g);
             // なめらかな輪郭 (屋根の α) の勾配が取れる所はそちらを使う (斜めの建物でも向きが正確)
-            vec2 ga = vec2(textureLod(uCityRoof, (hit.xy + vec2(1.0, 0.0)) / S, 0.0).a - textureLod(uCityRoof, (hit.xy - vec2(1.0, 0.0)) / S, 0.0).a,
-                           textureLod(uCityRoof, (hit.xy + vec2(0.0, 1.0)) / S, 0.0).a - textureLod(uCityRoof, (hit.xy - vec2(0.0, 1.0)) / S, 0.0).a);
+            vec2 ga = vec2(textureLod(uCityOutline, (hit.xy + vec2(1.0, 0.0)) / S, 0.0).r - textureLod(uCityOutline, (hit.xy - vec2(1.0, 0.0)) / S, 0.0).r,
+                           textureLod(uCityOutline, (hit.xy + vec2(0.0, 1.0)) / S, 0.0).r - textureLod(uCityOutline, (hit.xy - vec2(0.0, 1.0)) / S, 0.0).r);
             if (length(ga) > 0.05) n = -normalize(ga);
         }
 
@@ -261,12 +267,12 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                     ds = max(ds, k * (p.z - base) / den);
                 }
                 if (solid) {
-                    if (p.z >= bot && p.z <= top && textureLod(uCityRoof, (p.xy) / S, 0.0).a > 0.5) { lit = 0.0; break; }
+                    if (p.z >= bot && p.z <= top && textureLod(uCityOutline, (p.xy) / S, 0.0).r > 0.5) { lit = 0.0; break; }
                     float sb = (bot - o.z) / toLight.z;                               // 高架の裏の面に届く所
                     if (p.z < bot && sb <= sl + ds) {
                         vec2 pb = o.xy + toLight.xy * sb;                              // そこが輪郭の内側なら影
                         vec4 eb = texelFetch(uCityData, ivec2(clamp(floor(pb), vec2(0.0), S - 1.0)), 0);
-                        if (eb.r < EMPTY_R && abs(eb.r - d.r) < KEY_TOL + 1.0 / 255.0 && textureLod(uCityRoof, pb / S, 0.0).a > 0.5) { lit = 0.0; break; }
+                        if (eb.r < EMPTY_R && abs(eb.r - d.r) < KEY_TOL + 1.0 / 255.0 && textureLod(uCityOutline, pb / S, 0.0).r > 0.5) { lit = 0.0; break; }
                     }
                 }
                 sl += ds;
@@ -287,13 +293,11 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                 vec4 e = texelFetch(uCityData, ivec2(clamp(floor(hit.xy + o), vec2(0.0), S - 1.0)), 0);
                 occ += (e.r < EMPTY_R ? 1.0 : 0.0) * (k < 8 ? 0.6 : 0.4) / 8.0;
             }
-            bool underDeck = d.r < EMPTY_R && d.r > 0.1 && textureLod(uCityRoof, (hit.xy) / S, 0.0).a > 0.5;                  // 高架の床の下
+            bool underDeck = d.r < EMPTY_R && d.r > 0.1 && textureLod(uCityOutline, (hit.xy) / S, 0.0).r > 0.5;                  // 高架の床の下
             float ao = underDeck ? 0.55 : 1.0 - 0.38 * clamp(occ * 2.0, 0.0, 1.0);
             col *= ao * mix(0.68, 1.0, lit);
         } else if (face == 2) {                                                    // 屋根
-            vec4 r = textureLod(uCityRoof, uv, lod);
-            vec3 base = textureLod(uCityGround, uv, lod).rgb * 1.25;                 // 屋根の隙間は壁の色
-            col = mix(base, r.rgb, clamp(r.a * 2.0, 0.0, 1.0));                   // α は輪郭用 (0.5 以上は屋根)
+            col = textureLod(uCityRoof, uv, lod).rgb;
         } else {                                                                   // 壁
             vec4 d = texelFetch(uCityData, ivec2(clamp(floor(hit.xy - n * 0.5), vec2(0.0), S - 1.0)), 0);
             d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
