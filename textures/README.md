@@ -18,4 +18,5 @@
 | `tile?_cone.png` | `uCityCone` | 1 チャンネル。円錐ステップ値 | NEAREST、ミップなし、リニア |
 | `tile?_outline.png` | `uCityOutline` | 1 チャンネル。なめらかな輪郭 (0.5 = 輪郭) | LINEAR、ミップなし、リニア |
 
-ラップはどれも CLAMP。シェーダーの定数は `CORE = 1024`、`DIST_SCALE = 2`、`CONE_MAP_W = 2048` です。
+ラップはどれも CLAMP。シェーダーの値は `TEX_CORE = 1024`、`TEX_SIZE = 1408`、`DIST_SCALE = 2`、`CONE_MAP_W = 2048` です。
+デモではこのテクスチャを 1 枚 2000 × 2000 のポリゴンに貼っています (ズーム 1 で 1 テクセル ≒ 1.95 ピクセル)。

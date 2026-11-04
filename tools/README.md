@@ -115,7 +115,10 @@ data / cone / outline は **sRGB にしない** でください。値がその�
 
 1. サンプラーは外のコードで `uCityData` / `uCityRoof` / `uCityGround` / `uCityCone` / `uCityOutline` の名前で宣言します。名前が違う場合は、glsl の中のこの 5 つの名前を一括置換します (glsl の中に `#define` はありません)。
 2. 関数の先頭の「調整する値」(画角、光の向き、建物の高さ、フラグ) をシーンに合わせて書き換えます。
-3. 「定数」の `CORE` / `DIST_SCALE` / `CONE_MAP_W` を `bake_info.txt` の値に合わせます。
+3. 「マッピング」の `TEX_CORE` (ポリゴンに映る範囲) と `TEX_SIZE` (マージン込みの全体)、「定数」の `DIST_SCALE` / `CONE_MAP_W` を `bake_info.txt` の値に合わせます。
+   - ポリゴン UV 0..1 が `TEX_CORE` の範囲に対応します。ポリゴンの大きさ (画面のピクセル数) は自由で、ズームはポリゴンの拡大縮小で決まります。
+   - テクスチャの実際の解像度が `TEX_SIZE` と違っても、`TEX_SIZE` 全体に引き伸ばして読みます (例えば半分の解像度のテクスチャに差し替えても位置は合う)。
+     高さ・距離・円錐はこの単位で扱うので、`HEIGHT_SCALE` と `CONE_MAP_W` もこの単位で考えます。
 
 ```glsl
 uniform sampler2D uCityData, uCityRoof, uCityGround, uCityCone, uCityOutline;   // 外のコードでの宣言

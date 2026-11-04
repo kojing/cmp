@@ -10,9 +10,10 @@
 //     ズーム (1 ピクセルあたりのテクセル数) がわかる → ズームはポリゴンの拡大縮小だけでよい。
 //   ・視点は画面に固定:画面の (0.5, 0.5 + EYE_OFFSET / 2) の真上、高さは画角で決まる。
 //   ・それ以外の値 (画角・光・建物の高さ・フラグ) は関数の中の変数。サンプラーだけは外のコードで宣言する。
+//   ・ポリゴン UV と TEX_CORE / TEX_SIZE の対応だけでマッピングする (テクスチャの実際の解像度には依存しない)。
 //   ・ポリゴンごとにそのタイルのテクスチャ 5 枚をバインドする (テクスチャ配列は使わない)。
 //
-// テクスチャ (コアの周りに片側 MARGIN を足して切り出したもの。幅 S = CORE + 2 × MARGIN)
+// テクスチャ (コアの周りに片側マージンを足して切り出したもの。TEX_SIZE = TEX_CORE + 2 × マージン)
 //   data   (RGBA8, NEAREST)  R = 下端の高さ (0 / 56 = 高架 / 255 = 空き地) / G = 上端 (4 の倍数) /
 //                            B = 同じ高さ領域の境界までの距離 (1 テクセルあたり DIST_SCALE)
 //   roof   (RGB,  ミップあり) 屋根のアルベド (建物の外は一番近い屋根の色で埋めておく)
@@ -31,7 +32,7 @@
 //   影  :最大の建物の高さ × 光の水平成分 ÷ 光の垂直成分 (影は地面にだけ落とす)
 //
 // ASTC 4x4
-//   ・CORE とマージンは 4 の倍数 (cone が半分の解像度ならマージンは 8 の倍数)。
+//   ・コアとマージンは (実際のテクセルで) 4 の倍数 (cone が半分の解像度ならマージンは 8 の倍数)。
 //     ブロックがそろっていれば、隣のタイルとの重なりは同じ値に復元される。
 //   ・高さ (R/G) は 4 の倍数で作り、読むときに丸める。
 //   ・距離 B と円錐は 6 コード小さく読み、進む距離にだけ使う (実測の超過は最大 3 コード)。
@@ -63,17 +64,24 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
     bool  HEIGHT_SNAP  = true;    // ASTC 対策:高さ R/G を 4 の倍数に丸めて読む
     bool  SHOW_STARVED = false;   // デバッグ:マージン不足の所を赤く
 
+    // ---- マッピング (ポリゴンとテクスチャの対応) ----
+    // ポリゴン UV 0..1 が、テクスチャのうちマージンを除いた TEX_CORE の範囲に対応する。
+    // 単位は「テクセル」だが、実際のテクスチャの解像度とは別に決めてよい
+    // (実際の解像度が違っても、TEX_SIZE 全体に引き伸ばして読む。高さ・距離・円錐もこの単位で扱う)
+    float TEX_CORE     = 1024.0;  // ポリゴンに映る範囲 (マージンを除いた大きさ)
+    float TEX_SIZE     = 1408.0;  // マージン込みのテクスチャ全体の大きさ (= TEX_CORE + 2 × 片側マージン)
+
     // ---- 定数 (タイルの作り方に合わせる。city_bake.py の出力に表示される値) ----
-    const float CORE         = 1024.0;         // ポリゴンが映す範囲 (テクセル)
     const float DIST_SCALE   = 2.0;            // data の B が 1 テクセルあたりいくつ増えるか
-    const float DIST_TEX     = 255.0 / DIST_SCALE;
-    const float CONE_MAP_W   = 2048.0;         // 円錐マップを作ったマップ全体の幅 (data のテクセル)
+    float DIST_TEX     = 255.0 / DIST_SCALE;            // B = 1 のときの距離 (data のテクセル)
+    const float CONE_MAP_W   = 2048.0;         // 円錐マップを作ったマップ全体の幅 (マッピングの単位)
     const int   STEPS        = 160;
     const int   SHADOW_STEPS = 96;
     const float EPS          = 0.6;            // 境界を越える最小の歩幅 (テクセル)
     const float CONE_C       = 0.1;
     const float EMPTY_R      = 250.0 / 255.0;  // R がこれ以上なら空き地 (255 が 254 に化けても・丸めても空き地)
 
+    DIST_TEX /= float(textureSize(uCityData, 0).x) / TEX_SIZE;     // → マッピングの単位
     int   flags     = (DROP_SHADOW ? 1 : 0) | (SIDE_SHADE ? 2 : 0) | (SHOW_STARVED ? 4 : 0)
                     | (ASTC_SAFE ? 8 : 0) | (HEIGHT_SNAP ? 16 : 0);
     float heightTex = HEIGHT_SCALE * CONE_MAP_W;                   // G = 255 のときの高さ (テクセル)
@@ -86,19 +94,22 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
     vec2 pdx = dFdx(polyUV),   pdy = dFdy(polyUV);
     vec2 res = vec2(1.0 / max(abs(sdx.x), 1e-9), 1.0 / max(abs(sdy.y), 1e-9));   // 画面の解像度 (px)
     mat2 J   = mat2(pdx, pdy);                                     // 1 ピクセル動いた時のポリゴン UV の変化
-    float texPerPx = sqrt(abs(determinant(J))) * CORE;             // 1 ピクセルあたりのテクセル数 (= 1 / ズーム)
+    float texPerPx = sqrt(abs(determinant(J))) * TEX_CORE;             // 1 ピクセルあたりのテクセル数 (= 1 / ズーム)
     float lod      = max(log2(texPerPx), 0.0);
 
-    vec2  S      = vec2(textureSize(uCityData, 0));
-    float MARGIN = 0.5 * (S.x - CORE);                             // テクスチャの大きさから片側マージンを求める
-    vec2  P      = MARGIN + polyUV * CORE;                         // 地面上の位置 (テクスチャのテクセル)
+    vec2  S      = vec2(TEX_SIZE);                                 // 以下の計算の単位 (マッピングのテクセル)
+    float MARGIN = 0.5 * (TEX_SIZE - TEX_CORE);                    // 片側マージン
+    vec2  P      = MARGIN + polyUV * TEX_CORE;                     // 地面上の位置
+    // data の実際の解像度への変換 (TEX_SIZE と同じなら 1)。読む時だけ使う
+    vec2  dRes   = vec2(textureSize(uCityData, 0));
+    vec2  dSc    = dRes / S;
 
     float fov    = radians(FOV_DEG);
     vec2  eyePx  = vec2(0.5, 0.5 + 0.5 * EYE_OFFSET) * res;      // 視点の真下 (画面のピクセル)
     vec2  fragPx = screenUV * res;
     vec2  eyeUV  = polyUV + J * (eyePx - fragPx);                  // 視点の真下 (ポリゴン UV)
     float eyeH   = 0.5 * res.y / tan(0.5 * fov);                   // 視点の高さ (画面のピクセル)
-    vec3  eye    = vec3(MARGIN + eyeUV * CORE, eyeH * texPerPx);   // 視点 (テクセル)
+    vec3  eye    = vec3(MARGIN + eyeUV * TEX_CORE, eyeH * texPerPx);   // 視点 (テクセル)
 
     // ---- ASTC 4x4 対策 ----
     // 距離 B と円錐は「大きく復元」されると建物を飛び越えるので、6 コード小さく読む
@@ -137,7 +148,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
         for (int i = 0; i < STEPS; i++) {
             if (t >= 1.0) break;
             vec3 p  = eye + D * t;
-            vec4 d  = texelFetch(uCityData, ivec2(clamp(floor(p.xy), vec2(0.0), S - 1.0)), 0);
+            vec4 d  = texelFetch(uCityData, ivec2(clamp(floor((p.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
             d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
             bool solid = d.r < EMPTY_R;
             float bot  = d.r * heightTex, top = d.g * heightTex;
@@ -152,7 +163,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                     for (int k = 0; k < 10; k++) {
                         float tm = 0.5 * (tA + tB);
                         vec3  q  = eye + D * tm;
-                        vec4  e  = texelFetch(uCityData, ivec2(clamp(floor(q.xy), vec2(0.0), S - 1.0)), 0);
+                        vec4  e  = texelFetch(uCityData, ivec2(clamp(floor((q.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
                         e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
                         bool inside = e.r < EMPTY_R && q.z >= e.r * heightTex && q.z <= e.g * heightTex;
                         if (inside) inside = textureLod(uCityOutline, q.xy / S, 0.0).r > 0.5;
@@ -160,7 +171,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                     }
                     // 入る直前の点の真下が建物 (屋根より上) なら屋根の面から、そうでなければ側面から入った
                     vec3 qa = eye + D * tA;
-                    vec4 ea = texelFetch(uCityData, ivec2(clamp(floor(qa.xy), vec2(0.0), S - 1.0)), 0);
+                    vec4 ea = texelFetch(uCityData, ivec2(clamp(floor((qa.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
                     ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
                     if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityOutline, (qa.xy) / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
                     else                                           { face = 3; hit = eye + D * tB; }
@@ -196,7 +207,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
         // 壁の下の方は、1 歩で縦に何テクセルも下がるので、中の点を一度も踏まずに地面まで来ることがある。
         // その幅が視点の動きで変わり、地面と壁の境目がちらつく。地面の点で判定して二分法で詰め直す
         if (face == 1) {
-            vec4 e = texelFetch(uCityData, ivec2(clamp(floor(Ps), vec2(0.0), S - 1.0)), 0);
+            vec4 e = texelFetch(uCityData, ivec2(clamp(floor((Ps) * dSc), vec2(0.0), dRes - 1.0)), 0);
             e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
             bool groundIn = e.r < EMPTY_R && e.r * heightTex <= 0.5;               // 地面から立つ物の中
             if (groundIn) groundIn = textureLod(uCityOutline, Ps / S, 0.0).r > 0.5;
@@ -205,14 +216,14 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                 for (int k = 0; k < 10; k++) {
                     float tm = 0.5 * (tA + tB);
                     vec3  q  = eye + D * tm;
-                    vec4  f  = texelFetch(uCityData, ivec2(clamp(floor(q.xy), vec2(0.0), S - 1.0)), 0);
+                    vec4  f  = texelFetch(uCityData, ivec2(clamp(floor((q.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
                     f.rg = mix(f.rg, round(f.rg * 63.75) / 63.75, SNAP);
                     bool inside = f.r < EMPTY_R && q.z >= f.r * heightTex && q.z <= f.g * heightTex;
                     if (inside) inside = textureLod(uCityOutline, q.xy / S, 0.0).r > 0.5;
                     if (inside) tB = tm; else tA = tm;
                 }
                 vec3 qa = eye + D * tA;
-                vec4 ea = texelFetch(uCityData, ivec2(clamp(floor(qa.xy), vec2(0.0), S - 1.0)), 0);
+                vec4 ea = texelFetch(uCityData, ivec2(clamp(floor((qa.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
                 ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
                 if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityOutline, qa.xy / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
                 else { face = 3; hit = eye + D * tB; }
@@ -224,13 +235,13 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
         vec2 n = vec2(0.0, 1.0);
         if (face == 3) {
             vec2 c0 = hit.xy + normalize(D.xy) * 0.3;                              // 少し内側 (視線の進む側) を中心に
-            vec4 dc = texelFetch(uCityData, ivec2(clamp(floor(c0), vec2(0.0), S - 1.0)), 0);
+            vec4 dc = texelFetch(uCityData, ivec2(clamp(floor((c0) * dSc), vec2(0.0), dRes - 1.0)), 0);
             dc.rg = mix(dc.rg, round(dc.rg * 63.75) / 63.75, SNAP);
             vec2 g = vec2(0.0);
             for (int k = 0; k < 16; k++) {
                 float a = 6.2831853 * (float(k) + 0.5) / 16.0;
                 vec2 o = vec2(cos(a), sin(a));
-                vec4 dn = texelFetch(uCityData, ivec2(clamp(floor(c0 + o * 2.5), vec2(0.0), S - 1.0)), 0);
+                vec4 dn = texelFetch(uCityData, ivec2(clamp(floor((c0 + o * 2.5) * dSc), vec2(0.0), dRes - 1.0)), 0);
                 dn.rg = mix(dn.rg, round(dn.rg * 63.75) / 63.75, SNAP);
                 bool same = all(lessThan(abs(dn.rg - dc.rg), vec2(KEY_TOL)));
                 if (!same) g += o;
@@ -252,7 +263,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                 if (sl > sEnd) break;
                 vec3 p = o + toLight * sl;
                 if (any(lessThan(p.xy, vec2(0.0))) || any(greaterThanEqual(p.xy, S))) { starved = true; break; }
-                vec4 d = texelFetch(uCityData, ivec2(floor(p.xy)), 0);
+                vec4 d = texelFetch(uCityData, ivec2(clamp(floor((p.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
                 d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
                 bool solid = d.r < EMPTY_R;
                 float bot = d.r * heightTex, top = d.g * heightTex;
@@ -271,7 +282,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
                     float sb = (bot - o.z) / toLight.z;                               // 高架の裏の面に届く所
                     if (p.z < bot && sb <= sl + ds) {
                         vec2 pb = o.xy + toLight.xy * sb;                              // そこが輪郭の内側なら影
-                        vec4 eb = texelFetch(uCityData, ivec2(clamp(floor(pb), vec2(0.0), S - 1.0)), 0);
+                        vec4 eb = texelFetch(uCityData, ivec2(clamp(floor((pb) * dSc), vec2(0.0), dRes - 1.0)), 0);
                         if (eb.r < EMPTY_R && abs(eb.r - d.r) < KEY_TOL + 1.0 / 255.0 && textureLod(uCityOutline, pb / S, 0.0).r > 0.5) { lit = 0.0; break; }
                     }
                 }
@@ -282,7 +293,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
         // ---- 色 ----
         vec2 uv = hit.xy / S;
         if (face == 1) {                                                           // 地面
-            vec4 d = texelFetch(uCityData, ivec2(clamp(floor(hit.xy), vec2(0.0), S - 1.0)), 0);
+            vec4 d = texelFetch(uCityData, ivec2(clamp(floor((hit.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
             d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
             col = textureLod(uCityGround, uv, lod).rgb;
             // 地面の AO:半径 4 と 10 テクセルの円周 8 点ずつで、建物が占める割合を見る (B は使わない)
@@ -290,7 +301,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
             for (int k = 0; k < 16; k++) {
                 float a = 6.2831853 * (float(k) + 0.5) / 8.0;
                 vec2 o = vec2(cos(a), sin(a)) * (k < 8 ? 4.0 : 10.0);
-                vec4 e = texelFetch(uCityData, ivec2(clamp(floor(hit.xy + o), vec2(0.0), S - 1.0)), 0);
+                vec4 e = texelFetch(uCityData, ivec2(clamp(floor((hit.xy + o) * dSc), vec2(0.0), dRes - 1.0)), 0);
                 occ += (e.r < EMPTY_R ? 1.0 : 0.0) * (k < 8 ? 0.6 : 0.4) / 8.0;
             }
             bool underDeck = d.r < EMPTY_R && d.r > 0.1 && textureLod(uCityOutline, (hit.xy) / S, 0.0).r > 0.5;                  // 高架の床の下
@@ -299,7 +310,7 @@ vec4 cityTile(vec2 screenUV, vec2 polyUV)
         } else if (face == 2) {                                                    // 屋根
             col = textureLod(uCityRoof, uv, lod).rgb;
         } else {                                                                   // 壁
-            vec4 d = texelFetch(uCityData, ivec2(clamp(floor(hit.xy - n * 0.5), vec2(0.0), S - 1.0)), 0);
+            vec4 d = texelFetch(uCityData, ivec2(clamp(floor((hit.xy - n * 0.5) * dSc), vec2(0.0), dRes - 1.0)), 0);
             d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
             float bot = d.r * heightTex, top = d.g * heightTex;
             vec2 wuv = (hit.xy - n * 2.0) / S;                                     // 壁の色は建物の内側に置いてある

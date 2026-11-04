@@ -420,7 +420,7 @@ def main(argv=None):
                 for n, arr in outs.items():
                     f = F if n == 'cone' else 1
                     save(cut(arr, i * C - M, j * C - M, S, f), os.path.join(td, f'{name}_{n}.png'))
-        info += [f'CORE            = {C}.0   (シェーダーの CORE)', f'MARGIN          = {M}  (タイルの幅 {S}、cone は {S // F})',
+        info += [f'TEX_CORE        = {C}.0   (シェーダーの TEX_CORE)', f'TEX_SIZE        = {S}.0   (シェーダーの TEX_SIZE = コア + 2 × マージン {M}、cone は {S // F})',
                  f'タイル          = {W // C} x {H // C} 枚 (tiles/横_縦_*.png、画像の左上が 0_0)']
     open(os.path.join(a.out, 'bake_info.txt'), 'w', encoding='utf-8').write('\n'.join(info) + '\n')
     print('\n'.join(info))
