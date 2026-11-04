@@ -120,11 +120,22 @@ data / cone / outline は **sRGB にしない** でください。値がその�
    - テクスチャの実際の解像度が `TEX_SIZE` と違っても、`TEX_SIZE` 全体に引き伸ばして読みます (例えば半分の解像度のテクスチャに差し替えても位置は合う)。
      高さ・距離・円錐はこの単位で扱うので、`HEIGHT_SCALE` と `CONE_MAP_W` もこの単位で考えます。
 
+4. **精度はすべて highp にします。** 影や起伏にノイズが出る場合、まずここを確認してください。
+   - 関数の中の計算は highp で宣言してありますが、入力と読み込みは外のコード次第です。
+   - `polyUV` の varying は頂点シェーダーとフラグメントシェーダーの両方で `highp` で宣言します。half / mediump の UV では、
+     位置が 1/2048 単位に丸められ、さらに UV の微分 (ズームと視点の位置を求めている) が大きく乱れます。
+   - サンプラーも `highp` にします (`precision highp sampler2D;` または `uniform highp sampler2D ...`)。
+     フラグメントシェーダーのサンプラーの既定は lowp で、輪郭の線形補間や距離の精度が落ちます。
+   - エンジンの都合で UV の精度を上げられない場合は、関数の中の `SCREEN_W_PX` / `SCREEN_H_PX` / `POLY_PX`
+     (画面の大きさと、ポリゴン 1 枚の画面上の大きさ) に値を入れてください。微分を使わなくなり、ノイズの大部分が消えます。
+
 ```glsl
+precision highp float;
+precision highp sampler2D;
 uniform sampler2D uCityData, uCityRoof, uCityGround, uCityCone, uCityOutline;   // 外のコードでの宣言
 #include "city_tile_fn.glsl"                                      // (または中身を貼り付ける)
 
-in vec2 vPolyUV;                 // ポリゴンの UV (0..1、コアの範囲)
+in highp vec2 vPolyUV;           // ポリゴンの UV (0..1、コアの範囲)。頂点シェーダー側も highp
 uniform vec2 uScreenSize;
 out vec4 fragColor;
 void main() {
