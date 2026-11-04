@@ -19,9 +19,11 @@
 //   data   (RGBA8, NEAREST)  R = 下端の高さ (0 / 56 = 高架 / 255 = 空き地) / G = 上端 (4 の倍数) /
 //                            B = 同じ高さ領域の境界までの距離 (1 テクセルあたり DIST_SCALE)
 //   roof   (RGB,  ミップあり) 屋根のアルベド (建物の外は一番近い屋根の色で埋めておく)
-//   outline(R8,   LINEAR、ミップなし) なめらかな輪郭:符号付き距離 sd (内側が負) から
-//                            v = 0.5 − sd / 4。線形補間した v = 0.5 を輪郭として使う (テクセルより細かい)。
-//                            data のほうは輪郭に少しでもかかるテクセルを建物にしておく (外側 0.75 テクセルまで)。
+//   outline(R8,   ミップなし) 一番近い境界までの距離 (符号なし、0〜2 テクセル → 0〜1)。data と同じ解像度。
+//                            境界は外側の輪郭と、段の境目 (基壇と塔、高架の床と柱など) のどちらも。
+//                            符号は高さ z ごとに data から付ける (まわり 4 テクセルが z で中なら +、外なら −)。
+//                            ±距離を補間して 0 になる所が、その高さでの輪郭 (テクセルより細かい)。
+//                            data の R/G はテクセルの中心で決める (膨らませない)。texelFetch で読むのでフィルターは問わない。
 //                            ASTC では 1 チャンネルだけのテクスチャにすること。色と一緒に圧縮すると
 //                            色の模様に引きずられて輪郭がずれる (実測で最大 0.9 テクセル → 1 チャンネルなら 0.1 以下)
 //   ground (RGB,  ミップあり) 地面のアルベド。地面から立つ建物の中 (R=0) は壁の色
@@ -48,7 +50,7 @@
 // 外のコードで名前が違う場合は、このファイルの中の名前を一括置換する
 //   uCityData   : data   R 下端 / G 上端 / B 境界までの距離 (NEAREST)
 //   uCityRoof   : roof   RGB 屋根の色 (LINEAR, ミップ)
-//   uCityOutline: outline R なめらかな輪郭 (LINEAR, ミップなし)
+//   uCityOutline: outline R 一番近い境界までの距離 (ミップなし、texelFetch で読む)
 //   uCityGround : ground RGB 地面と壁の色 (LINEAR, ミップ)
 //   uCityCone   : cone   R 円錐ステップ値 (NEAREST)
 
@@ -97,6 +99,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     const highp float EPS          = 0.6;            // 境界を越える最小の歩幅 (テクセル)
     const highp float CONE_C       = 0.1;
     const highp float EMPTY_R      = 250.0 / 255.0;  // R がこれ以上なら空き地 (255 が 254 に化けても・丸めても空き地)
+    const highp float ZT           = 0.02;           // 高さの内外判定のゆとり (テクセル)
 
     DIST_TEX /= float(textureSize(uCityData, 0).x) / TEX_SIZE;     // → マッピングの単位
     int   flags     = (DROP_SHADOW ? 1 : 0) | (SIDE_SHADE ? 2 : 0) | (SHOW_STARVED ? 4 : 0)
@@ -160,7 +163,6 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
         return vec4(vec3(v), 1.0);
     }
     int stepsUsed = 0;
-    bool sameTop = false;               // 入った所と、その直前の点の真下が同じ建物か (段のある建物の判定)
     bool starved = false;                       // マージンが足りず、視線の始まりがテクスチャの外
     highp vec3 col;
     {
@@ -178,129 +180,152 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
             if (tEnter > t) { starved = true; t = tEnter; }
         }
 
-        // ---- 一次レイ:距離 B と円錐で進む ----
-        // B と円錐は「どこまで安全に進めるか」にだけ使う。当たった位置・法線・AO は
-        // 高さ R/G (丸めれば ASTC でも元の値に戻る) だけで決めるので、圧縮のノイズが絵に出ない
+        // ---- 一次レイ ----
+        // 1 回のループで 1 点を調べる。調べ方は mode で変わる:
+        //   0 = 進む (距離 B と円錐の歩幅)  1 = 入った所を二分法で詰める
+        //   2 = 屋根から入ったか壁から入ったかの判定  3 = 地面の点が高架の床の下か  4 = 終わり
+        //
+        // 点が「中」かどうか (なめらかな内外):
+        //   境界から離れた所 (B が大きい) は data のテクセルだけで決める。
+        //   境界の近くでは、まわりの 4 テクセルそれぞれで「この高さ z で中か」を data で調べて ±1 を付け、
+        //   outline (一番近い境界までの距離) を掛けて補間する。0 になる所がこの高さでの輪郭。
+        //   外側の輪郭も、段 (基壇と塔、高架の床と柱) の輪郭も、同じ計算でテクセルより細かく出る。
+        //   当たった位置・法線は高さ R/G と outline だけで決まり、B と円錐は歩幅にしか使わない
         int  face = 1;                              // 1 = 地面, 2 = 屋根, 3 = 壁
         highp vec3 hit  = vec3(Ps, 0.0);
-        highp float tPrev = t;                            // 直前の (外側だった) 位置
-        for (int i = 0; i < STEPS; i++) {
-            stepsUsed = i;
-            if (t >= 1.0) break;
-            highp vec3 p  = eye + D * t;
-            highp vec4 d  = texelFetch(uCityData, ivec2(clamp(floor((p.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
-            d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
-            bool solid = d.r < EMPTY_R;
-            highp float bot  = d.r * heightTex, top = d.g * heightTex;
-            highp float dt   = max(max(d.b - B_MARGIN, 0.0) * DIST_TEX, EPS) / xyLen;   // この間は同じ領域
-            if (solid) {
-                // data で中にいる時だけ、なめらかな輪郭 (屋根の α) を読む (毎ステップ読むと重い)
-                bool inData = p.z >= bot && p.z <= top;
-                if (inData) inData = textureLod(uCityOutline, p.xy / S, 0.0).r > 0.5;
-                if (inData) {                                                      // 中に入った (なめらかな輪郭の内側)
-                    // 外側 (tPrev) と内側 (t) の間を二分法で詰めて、入った所を求める
-                    highp float tA = tPrev, tB = t;
-                    for (int k = 0; k < 10; k++) {
-                        highp float tm = 0.5 * (tA + tB);
-                        highp vec3  q  = eye + D * tm;
-                        highp vec4  e  = texelFetch(uCityData, ivec2(clamp(floor((q.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                        e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
-                        bool inside = e.r < EMPTY_R && q.z >= e.r * heightTex && q.z <= e.g * heightTex;
-                        if (inside) inside = textureLod(uCityOutline, q.xy / S, 0.0).r > 0.5;
-                        if (inside) tB = tm; else tA = tm;
-                    }
-                    // 入る直前の点の真下が建物 (屋根より上) で、入った所も同じ建物なら屋根の面から、そうでなければ側面から入った
-                    // (段のある建物:低い部分の屋根の上から高い部分の側面に入った時は「側面」)
-                    highp vec3 qa = eye + D * tA;
-                    highp vec4 ea = texelFetch(uCityData, ivec2(clamp(floor((qa.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                    ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
-                    { highp vec4 eb = texelFetch(uCityData, ivec2(clamp(floor((eye.xy + D.xy * tB) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                      eb.rg = mix(eb.rg, round(eb.rg * 63.75) / 63.75, SNAP);
-                      sameTop = all(lessThan(abs(eb.rg - ea.rg), vec2(KEY_TOL))); }
-                    if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && sameTop && textureLod(uCityOutline, (qa.xy) / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
-                    else                                           { face = 3; hit = eye + D * tB; }
-                    break;
+        highp vec2 grad = vec2(0.0);                // なめらかな内外の場の勾配 (壁の法線)
+        bool  underDeck = false;                    // 地面の点が高架の床の下
+        highp float tStart = t, tPrev = t, tA = t, tB = t, zDeck = 0.0;
+        int mode = 0, nb = 0;
+        for (int i = 0; i < STEPS + 16; i++) {
+            if (mode == 4) break;
+            if (mode == 0) { if (i >= STEPS) break; stepsUsed = i; t = min(t, 1.0); }
+            highp float tm = 0.5 * (tA + tB);
+            highp vec3 q = mode == 0 ? eye + D * t
+                         : mode == 1 ? eye + D * tm
+                         : mode == 2 ? vec3((eye + D * tA).xy, (eye + D * tB).z)     // 入る直前の位置の、入った高さ
+                         :             vec3(Ps, zDeck);                              // 地面の点の、高架の床の下端の高さ
+
+            // ---- この点は中か ----
+            highp vec4 e0 = texelFetch(uCityData, ivec2(clamp(floor(q.xy * dSc), vec2(0.0), dRes - 1.0)), 0);
+            e0.rg = mix(e0.rg, round(e0.rg * 63.75) / 63.75, SNAP);
+            bool solid = e0.r < EMPTY_R;
+            highp float bot = e0.r * heightTex, top = e0.g * heightTex;
+            bool inF;
+            highp float hTop = 1e9, dBot = 1e9;     // 中だったテクセルの一番低い上端 / 高架の床の下端
+            if (mode == 0 && (e0.b - B_MARGIN) * DIST_TEX >= 0.5) {
+                // 境界から離れている:まわりの 4 テクセルも同じ領域なので、このテクセルだけで決まる
+                inF = solid && q.z >= bot - ZT && q.z <= top + ZT;
+                if (solid && e0.r > 0.1) dBot = bot;
+            } else {
+                highp vec2 g  = q.xy * dSc - 0.5;
+                highp vec2 b0 = floor(g);
+                highp vec2 fr = g - b0;
+                highp vec4 a  = vec4(0.0);
+                for (int j = 0; j < 4; j++) {
+                    ivec2 c = ivec2(clamp(b0 + vec2(float(j & 1), float(j >> 1)), vec2(0.0), dRes - 1.0));
+                    highp vec4 e = texelFetch(uCityData, c, 0);
+                    e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
+                    bool s = e.r < EMPTY_R && q.z >= e.r * heightTex - ZT && q.z <= e.g * heightTex + ZT;
+                    a[j] = (s ? 1.0 : -1.0) * texelFetch(uCityOutline, c, 0).r;
+                    if (s) hTop = min(hTop, e.g * heightTex);
+                    if (e.r < EMPTY_R && e.r > 0.1) dBot = min(dBot, e.r * heightTex);
                 }
-                if (p.z > top) {                                                   // 屋根面に届くか
+                inF  = mix(mix(a.x, a.y, fr.x), mix(a.z, a.w, fr.x), fr.y) > 0.0;
+                grad = vec2(mix(a.y - a.x, a.w - a.z, fr.y), mix(a.z - a.x, a.w - a.y, fr.x)) * dSc;
+            }
+
+            if (mode == 0) {
+                if (inF) {
+                    if (t <= tStart) { face = 3; hit = q; mode = 4; }             // 始まりからもう中 (マージン不足など)
+                    else { tA = tPrev; tB = t; nb = 0; mode = 1; }               // 外 (tPrev) と中 (t) の間を詰める
+                    continue;
+                }
+                if (t >= 1.0) {                                                  // 地面に着いた (外のまま)
+                    face = 1; hit = q;
+                    if (dBot < 1e8) { zDeck = dBot; mode = 3; } else mode = 4;
+                    continue;
+                }
+                highp float dt = max(max(e0.b - B_MARGIN, 0.0) * DIST_TEX, EPS) / xyLen;   // この間は同じ領域
+                highp float base = solid ? top : 0.0;                                    // 円錐ステップ
+                if (q.z > base) {
+                    highp float u = texelFetch(uCityCone, ivec2(clamp(floor(q.xy * coneSc), vec2(0.0), S * coneSc - 1.0)), 0).r;
+                    // 254 以上は「高い建物なし」。安全読みでは 6 コード引くので、この特別扱いは起きない
+                    u = u >= 253.5 / 255.0 && !safeRead ? 0.999 : max(u - C_MARGIN, 0.0);
+                    highp float k = CONE_C * u / (1.0 - u) * CONE_MAP_W / heightTex;          // 水平距離 ÷ 高さ (テクセル同士)
+                    dt = max(dt, k * (q.z - base) / (xyLen + k * eye.z));
+                }
+                // 屋根の面に届く歩幅なら、ちょうど屋根の高さで止まる (次の点で屋根の上かを調べる)
+                if (solid && q.z > top) {
                     highp float tt = 1.0 - top / eye.z;
-                    if (tt <= t + dt) {
-                        if (textureLod(uCityOutline, (eye.xy + D.xy * tt) / S, 0.0).r > 0.5) { face = 2; hit = eye + D * tt; break; }
-                    }
+                    if (tt > t && tt < t + dt) dt = tt - t;
                 }
-                // p.z < bot は高架の下をくぐる
-            }
-            highp float base = solid ? top : 0.0;                                        // 円錐ステップ
-            if (p.z > base) {
-                highp float u = texelFetch(uCityCone, ivec2(clamp(floor(p.xy * coneSc), vec2(0.0), S * coneSc - 1.0)), 0).r;
-                // 254 以上は「高い建物なし」。安全読みでは 6 コード引くので、この特別扱いは起きない
-                u = u >= 253.5 / 255.0 && !safeRead ? 0.999 : max(u - C_MARGIN, 0.0);
-                highp float k = CONE_C * u / (1.0 - u) * CONE_MAP_W / heightTex;          // 水平距離 ÷ 高さ (テクセル同士)
-                dt = max(dt, k * (p.z - base) / (xyLen + k * eye.z));
-            }
-            // 高架の床の上にいる時は、床の下端の高さを飛び越さないように一度そこで止まる
-            // (薄い床の側面を歩幅で飛び越すと、側面の下端が階段状になる)
-            if (solid && bot > 0.0 && p.z > bot) {
-                highp float tBotP = 1.0 - bot / eye.z;
-                if (tBotP > t + 1e-6 && t + dt > tBotP) dt = tBotP - t;
-            }
-            tPrev = t;
-            t += dt;
-        }
-
-        // ---- 足元の取りこぼし:地面に着いた点が建物の中なら、最後の 1 歩の間に壁へ入っている ----
-        // 壁の下の方は、1 歩で縦に何テクセルも下がるので、中の点を一度も踏まずに地面まで来ることがある。
-        // その幅が視点の動きで変わり、地面と壁の境目がちらつく。地面の点で判定して二分法で詰め直す
-        if (face == 1) {
-            highp vec4 e = texelFetch(uCityData, ivec2(clamp(floor((Ps) * dSc), vec2(0.0), dRes - 1.0)), 0);
-            e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
-            bool groundIn = e.r < EMPTY_R && e.r * heightTex <= 0.5;               // 地面から立つ物の中
-            if (groundIn) groundIn = textureLod(uCityOutline, Ps / S, 0.0).r > 0.5;
-            if (groundIn) {
-                highp float tA = tPrev, tB = 1.0;
-                for (int k = 0; k < 10; k++) {
-                    highp float tm = 0.5 * (tA + tB);
-                    highp vec3  q  = eye + D * tm;
-                    highp vec4  f  = texelFetch(uCityData, ivec2(clamp(floor((q.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                    f.rg = mix(f.rg, round(f.rg * 63.75) / 63.75, SNAP);
-                    bool inside = f.r < EMPTY_R && q.z >= f.r * heightTex && q.z <= f.g * heightTex;
-                    if (inside) inside = textureLod(uCityOutline, q.xy / S, 0.0).r > 0.5;
-                    if (inside) tB = tm; else tA = tm;
+                // 高架の床の上にいる時は、床の下端の高さを飛び越さないように一度そこで止まる
+                // (薄い床の側面を歩幅で飛び越すと、側面の下端が階段状になる)
+                if (solid && bot > 0.0 && q.z > bot) {
+                    highp float tBotP = 1.0 - bot / eye.z;
+                    if (tBotP > t + 1e-6 && t + dt > tBotP) dt = tBotP - t;
                 }
-                highp vec3 qa = eye + D * tA;
-                highp vec4 ea = texelFetch(uCityData, ivec2(clamp(floor((qa.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
-                { highp vec4 eb = texelFetch(uCityData, ivec2(clamp(floor((eye.xy + D.xy * tB) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                      eb.rg = mix(eb.rg, round(eb.rg * 63.75) / 63.75, SNAP);
-                      sameTop = all(lessThan(abs(eb.rg - ea.rg), vec2(KEY_TOL))); }
-                    if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && sameTop && textureLod(uCityOutline, qa.xy / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
-                else { face = 3; hit = eye + D * tB; }
+                tPrev = t;
+                t += dt;
+            } else if (mode == 1) {
+                if (inF) tB = tm; else tA = tm;
+                nb++;
+                if (nb >= 10) mode = 2;
+            } else if (mode == 2) {
+                // 入る直前の位置でも、入った高さなら中 → 上から入った (屋根)。外 → 横から入った (壁)
+                // (段のある建物:低い部分の屋根の上から高い部分の側面に入った時は「壁」になる)
+                if (inF && hTop < 1e8) { face = 2; hit = eye + D * (1.0 - hTop / eye.z); }
+                else                   { face = 3; hit = eye + D * tB; }
+                mode = 4;
+            } else {
+                underDeck = inF;
+                mode = 4;
             }
         }
 
-        // ---- 壁の法線:周りの 16 点のうち「同じ建物でない」点の方向を足す ----
-        // (B の勾配は ASTC の誤差で向きがぶれるので使わない)
+        // ---- 壁の法線:なめらかな内外の場の勾配 (外向き) ----
         highp vec2 n = vec2(0.0, 1.0);
         if (face == 3) {
-            highp vec2 c0 = hit.xy + normalize(D.xy) * 0.3;                              // 少し内側 (視線の進む側) を中心に
-            highp vec4 dc = texelFetch(uCityData, ivec2(clamp(floor((c0) * dSc), vec2(0.0), dRes - 1.0)), 0);
-            dc.rg = mix(dc.rg, round(dc.rg * 63.75) / 63.75, SNAP);
-            highp vec2 g = vec2(0.0);
-            for (int k = 0; k < 16; k++) {
-                highp float a = 6.2831853 * (float(k) + 0.5) / 16.0;
-                highp vec2 o = vec2(cos(a), sin(a));
-                highp vec4 dn = texelFetch(uCityData, ivec2(clamp(floor((c0 + o * 2.5) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                dn.rg = mix(dn.rg, round(dn.rg * 63.75) / 63.75, SNAP);
-                bool same = all(lessThan(abs(dn.rg - dc.rg), vec2(KEY_TOL)));
-                if (!same) g += o;
+            // 当たった点の ±1 テクセルで場を補間して差を取る (1 点の勾配より ASTC や距離の誤差に強い)
+            highp vec4 fs = vec4(0.0);                     // +x, -x, +y, -y
+            for (int k = 0; k < 4; k++) {
+                highp vec2 o = vec2(k == 0 ? 1.0 : k == 1 ? -1.0 : 0.0, k == 2 ? 1.0 : k == 3 ? -1.0 : 0.0);
+                highp vec2 g  = (hit.xy + o) * dSc - 0.5;
+                highp vec2 b0 = floor(g);
+                highp vec2 fr = g - b0;
+                highp vec4 a  = vec4(0.0);
+                for (int j = 0; j < 4; j++) {
+                    ivec2 c = ivec2(clamp(b0 + vec2(float(j & 1), float(j >> 1)), vec2(0.0), dRes - 1.0));
+                    highp vec4 e = texelFetch(uCityData, c, 0);
+                    e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
+                    bool s = e.r < EMPTY_R && hit.z >= e.r * heightTex - ZT && hit.z <= e.g * heightTex + ZT;
+                    a[j] = (s ? 1.0 : -1.0) * texelFetch(uCityOutline, c, 0).r;
+                }
+                fs[k] = mix(mix(a.x, a.y, fr.x), mix(a.z, a.w, fr.x), fr.y);
             }
-            if (length(g) > 1e-5) n = normalize(g);
-            // なめらかな輪郭 (屋根の α) の勾配が取れる所はそちらを使う (斜めの建物でも向きが正確)
-            highp vec2 ga = vec2(textureLod(uCityOutline, (hit.xy + vec2(1.0, 0.0)) / S, 0.0).r - textureLod(uCityOutline, (hit.xy - vec2(1.0, 0.0)) / S, 0.0).r,
-                           textureLod(uCityOutline, (hit.xy + vec2(0.0, 1.0)) / S, 0.0).r - textureLod(uCityOutline, (hit.xy - vec2(0.0, 1.0)) / S, 0.0).r);
-            if (length(ga) > 0.05) n = -normalize(ga);
+            highp vec2 gc = vec2(fs.x - fs.y, fs.z - fs.w);
+            if (length(gc) > 1e-3) grad = gc;
+            if (length(grad) > 1e-4) n = -normalize(grad);
+            else {
+                // 勾配が取れない時 (始まりから中など):周りの 16 点のうち「同じ建物でない」点の方向を足す
+                highp vec2 c0 = hit.xy + normalize(D.xy) * 0.3;
+                highp vec4 dc = texelFetch(uCityData, ivec2(clamp(floor((c0) * dSc), vec2(0.0), dRes - 1.0)), 0);
+                dc.rg = mix(dc.rg, round(dc.rg * 63.75) / 63.75, SNAP);
+                highp vec2 g = vec2(0.0);
+                for (int k = 0; k < 16; k++) {
+                    highp float a = 6.2831853 * (float(k) + 0.5) / 16.0;
+                    highp vec2 o = vec2(cos(a), sin(a));
+                    highp vec4 dn = texelFetch(uCityData, ivec2(clamp(floor((c0 + o * 2.5) * dSc), vec2(0.0), dRes - 1.0)), 0);
+                    dn.rg = mix(dn.rg, round(dn.rg * 63.75) / 63.75, SNAP);
+                    if (!all(lessThan(abs(dn.rg - dc.rg), vec2(KEY_TOL)))) g += o;
+                }
+                if (length(g) > 1e-5) n = normalize(g);
+            }
         }
 
         // ---- 落ち影:地面にだけ落とす (屋根・側面には落とさない) ----
+        // 中かどうかは一次レイと同じ (境界の近くだけ 4 テクセルで補間)
         highp float lit = 1.0;
         if ((flags & 1) != 0 && face == 1 && toLight.z > 1e-4) {
             highp vec3 o = hit + vec3(0.0, 0.0, 1e-3);
@@ -314,6 +339,24 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
                 d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
                 bool solid = d.r < EMPTY_R;
                 highp float bot = d.r * heightTex, top = d.g * heightTex;
+                bool inF;
+                if ((d.b - B_MARGIN) * DIST_TEX >= 0.5) {
+                    inF = solid && p.z >= bot - ZT && p.z <= top + ZT;
+                } else {
+                    highp vec2 g  = p.xy * dSc - 0.5;
+                    highp vec2 b0 = floor(g);
+                    highp vec2 fr = g - b0;
+                    highp vec4 a  = vec4(0.0);
+                    for (int j = 0; j < 4; j++) {
+                        ivec2 c = ivec2(clamp(b0 + vec2(float(j & 1), float(j >> 1)), vec2(0.0), dRes - 1.0));
+                        highp vec4 e = texelFetch(uCityData, c, 0);
+                        e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
+                        bool s = e.r < EMPTY_R && p.z >= e.r * heightTex - ZT && p.z <= e.g * heightTex + ZT;
+                        a[j] = (s ? 1.0 : -1.0) * texelFetch(uCityOutline, c, 0).r;
+                    }
+                    inF = mix(mix(a.x, a.y, fr.x), mix(a.z, a.w, fr.x), fr.y) > 0.0;
+                }
+                if (inF) { lit = 0.0; break; }
                 highp float ds = max(max(d.b - B_MARGIN, 0.0) * DIST_TEX, EPS) / lxy;
                 highp float base = solid ? top : 0.0;
                 if (p.z > base) {
@@ -324,14 +367,10 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
                     if (den <= 0.0) break;                                         // 円錐より急に昇る:もう当たらない
                     ds = max(ds, k * (p.z - base) / den);
                 }
-                if (solid) {
-                    if (p.z >= bot && p.z <= top && textureLod(uCityOutline, (p.xy) / S, 0.0).r > 0.5) { lit = 0.0; break; }
-                    highp float sb = (bot - o.z) / toLight.z;                               // 高架の裏の面に届く所
-                    if (p.z < bot && sb <= sl + ds) {
-                        highp vec2 pb = o.xy + toLight.xy * sb;                              // そこが輪郭の内側なら影
-                        highp vec4 eb = texelFetch(uCityData, ivec2(clamp(floor((pb) * dSc), vec2(0.0), dRes - 1.0)), 0);
-                        if (eb.r < EMPTY_R && abs(eb.r - d.r) < KEY_TOL + 1.0 / 255.0 && textureLod(uCityOutline, pb / S, 0.0).r > 0.5) { lit = 0.0; break; }
-                    }
+                // 高架の床の下にいる時は、床の下端の高さで一度止まる (次の点で床の裏に当たるかを調べる)
+                if (solid && p.z < bot) {
+                    highp float sb = (bot - o.z) / toLight.z;
+                    if (sb > sl && sb < sl + ds) ds = sb - sl;
                 }
                 sl += ds;
             }
@@ -351,13 +390,12 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
                 highp vec4 e = texelFetch(uCityData, ivec2(clamp(floor((hit.xy + o) * dSc), vec2(0.0), dRes - 1.0)), 0);
                 occ += (e.r < EMPTY_R ? 1.0 : 0.0) * (k < 8 ? 0.6 : 0.4) / 8.0;
             }
-            bool underDeck = d.r < EMPTY_R && d.r > 0.1 && textureLod(uCityOutline, (hit.xy) / S, 0.0).r > 0.5;                  // 高架の床の下
             highp float ao = underDeck ? 0.55 : 1.0 - 0.38 * clamp(occ * 2.0, 0.0, 1.0);
             col *= ao * mix(0.68, 1.0, lit);
         } else if (face == 2) {                                                    // 屋根
             col = textureLod(uCityRoof, uv, lod).rgb;
         } else {                                                                   // 壁
-            highp vec4 d = texelFetch(uCityData, ivec2(clamp(floor((hit.xy - n * 0.5) * dSc), vec2(0.0), dRes - 1.0)), 0);
+            highp vec4 d = texelFetch(uCityData, ivec2(clamp(floor((hit.xy - n * 1.2) * dSc), vec2(0.0), dRes - 1.0)), 0);
             d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
             highp float bot = d.r * heightTex, top = d.g * heightTex;
             // 壁の色は建物の内側に置いてある (ground では輪郭より 1.5 テクセル以上内側)。
@@ -373,7 +411,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
                 highp vec4 e = texelFetch(uCityData, ivec2(clamp(floor(q * dSc), vec2(0.0), dRes - 1.0)), 0);
                 e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
                 bool same = all(lessThan(abs(e.rg - d.rg), vec2(KEY_TOL)));
-                if (same && e.b * DIST_TEX >= 2.0) { wq = q; break; }   // B は 1 テクセル小さめに作ってあるので 2 = 境界から 3 テクセル
+                if (same && e.b * DIST_TEX >= 0.75) { wq = q; break; }  // B は 2.25 テクセル小さめに作ってあるので 0.75 = 境界から 3 テクセル
             }
             highp vec2 wuv = wq / S;
             col = bot > 0.0 ? textureLod(uCityRoof, wuv, 0.0).rgb * 0.6              // 高架の床の側面

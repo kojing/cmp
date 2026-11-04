@@ -20,10 +20,10 @@ def mir(a):
     top = np.concatenate([a, a[:, ::-1]], axis=1)
     return np.concatenate([top, top[::-1]], axis=0)
 os.makedirs('input4096', exist_ok=True)
-for f in ['mask', 'top', 'bottom', 'roof_color', 'ground_color', 'wall_color']:
+for f in ['mask', 'top', 'bottom', 'top2x', 'bottom2x', 'roof_color', 'ground_color', 'wall_color']:
     Image.fromarray(mir(np.array(Image.open(f'input/{f}.png')))).save(f'input4096/{f}.png')
-subprocess.check_call([sys.executable, BAKE, '--top', 'input4096/top.png', '--mask', 'input4096/mask.png',
-                       '--bottom', 'input4096/bottom.png', '--roof', 'input4096/roof_color.png',
+subprocess.check_call([sys.executable, BAKE, '--top', 'input4096/top2x.png', '--mask', 'input4096/mask.png',
+                       '--bottom', 'input4096/bottom2x.png', '--roof', 'input4096/roof_color.png',
                        '--out', 'baked', '--wrap', '--core', str(CORE), '--margin', str(MARGIN)])
 L = lambda f: np.array(Image.open(f))
 B = 'baked/'

@@ -234,6 +234,29 @@ Image.fromarray(np.where(inside, np.clip(G, 0, 255), 0).astype(np.uint8)).save(o
 Image.fromarray(np.where(inside & (R == 56), 56, 0).astype(np.uint8)).save(os.path.join(OUT, 'input', 'bottom.png'))       # 下端の高さ (高架だけ 56)
 Image.fromarray((np.clip(0.5 - sdAll, 0, 1) * 255).astype(np.uint8)).save(os.path.join(OUT, 'input', 'mask.png'))        # 建物マスク (AA あり)
 Image.fromarray(np.clip(roof[..., :3], 0, 255).astype(np.uint8)).save(os.path.join(OUT, 'input', 'roof_color.png'))       # 屋根の色
+# 4 倍の解像度の top / bottom (段の境目 = 高架の床と柱 の輪郭をテクセルより細かくするため。mask は 1 倍のまま)
+UP = 4
+toph = np.zeros((H * UP, W * UP), np.uint8); both = np.zeros((H * UP, W * UP), np.uint8)
+for b in bld:
+    r = int(np.ceil(0.5 * np.hypot(b['w'], b['h']))) + 2
+    y0, x0 = (int(b['cy']) - r) * UP, (int(b['cx']) - r) * UP
+    ys = np.arange(y0, y0 + 2 * r * UP); xs = np.arange(x0, x0 + 2 * r * UP)
+    yy, xx = np.meshgrid((ys + 0.5) / UP - b['cy'], (xs + 0.5) / UP - b['cx'], indexing='ij')
+    c_, s_ = np.cos(b['ang']), np.sin(b['ang'])
+    mm = (np.abs(c_ * xx + s_ * yy) <= b['w'] / 2) & (np.abs(-s_ * xx + c_ * yy) <= b['h'] / 2)
+    iy, ix = np.ix_(ys % (H * UP), xs % (W * UP))
+    sub = toph[iy, ix]; sub[mm] = b['g']; toph[iy, ix] = sub
+for y0 in range(0, H * UP, 512):                                   # 高架の床と柱 (帯ごとに計算してメモリを抑える)
+    Yh, Xh = (np.mgrid[y0:y0 + 512, 0:W * UP].astype(np.float32) + 0.5) / UP
+    dCh = np.abs(wrapd(Yh - curve(Xh), H)) / np.sqrt(1 + curve_d(Xh) ** 2)
+    dk_ = dCh <= DECK_HW
+    pl_ = np.zeros(dk_.shape, bool)
+    for px in np.arange(40, W, 150):
+        pl_ |= (wrapd(Xh - px, W) ** 2 + wrapd(Yh - curve(px), H) ** 2) <= 7.5 ** 2
+    t_ = toph[y0:y0 + 512]; b_ = both[y0:y0 + 512]
+    t_[dk_] = 64; b_[dk_] = 56; b_[pl_] = 0
+Image.fromarray(toph).save(os.path.join(OUT, 'input', 'top4x.png'))
+Image.fromarray(both).save(os.path.join(OUT, 'input', 'bottom4x.png'))
 save(data, 'map_data.png'); save(roof, 'map_roof.png'); save(ground, 'map_ground.png'); save(cone, 'map_cone.png')
 
 # ---------------- タイル A / B (マージン付き) ----------------

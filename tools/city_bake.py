@@ -2,10 +2,12 @@
 """
 city_bake.py ― 高さの画像と建物マスクから、cityTile() 用の各チャンネルを作る
 
-人が用意するもの (すべて同じ解像度のグレースケール PNG。マップ全体 1 枚)
+人が用意するもの (グレースケール PNG。マップ全体 1 枚。top / bottom だけ出力の N 倍の解像度でもよい)
   --top     上端の高さ。0 = 何もない、1..255 = 建物の上端 (アンチエイリアスなし)
-  --mask    建物マスク。白 = 建物 (アンチエイリアスあり。縁の灰色から輪郭をテクセルより細かく求める)
-            省略すると --top > 0 を白黒マスクとして使う (斜めの辺は階段になる)
+            N 倍 (2 倍、4 倍など) の解像度で渡すと、段 (基壇と塔、高架の床と柱) の輪郭も 1/N テクセルの細かさになる
+  --mask    建物マスク。白 = 建物 (アンチエイリアスあり。縁の灰色から外側の輪郭をテクセルより細かく求める)
+            出力の解像度で渡す。top がその N 倍なら N を自動で決める
+            省略すると --top > 0 から作る (top が N 倍なら N×N の割合がアンチエイリアスになる。1 倍なら階段)
   --bottom  下端の高さ (省略可)。0 = 地面から立つ、高架などは床の下端の高さ
   --roof    屋根の色 (RGB、省略可)。渡すと建物の外側を一番近い屋根の色で埋めた画像も作る
   --ground  地面と壁の色 (RGB、省略可)。渡すとほかと同じマージンでタイルに切り出す
@@ -14,7 +16,8 @@ city_bake.py ― 高さの画像と建物マスクから、cityTile() 用の各�
   data_R.png    下端の高さ (255 = 空き地)                → data テクスチャの R
   data_G.png    上端の高さ (4 の倍数)                    → data テクスチャの G
   data_B.png    同じ高さの領域の境界までの距離            → data テクスチャの B
-  outline.png   なめらかな輪郭 (0.5 = 輪郭)               → outline テクスチャ (1 チャンネル)
+  outline.png   一番近い境界までの距離 (0〜2 テクセル)    → outline テクスチャ (1 チャンネル)
+                境界は外側の輪郭と段の境目の両方。シェーダーが高さごとに符号を付けて輪郭にする
   cone.png      円錐ステップ値 (半分の解像度)             → cone テクスチャ (R8)
   wall_mask.png 地面テクスチャに壁の色を置く範囲 (白)     → ground の RGB を作るときの目安
   roof_RGB.png  建物の外を埋めた屋根の色 (--roof のとき)  → roof テクスチャの RGB
@@ -260,6 +263,42 @@ def fine_sdf(cov, wrap, up=4, chunk=512, limit=4.0):
     return np.clip(sd, -limit, limit)
 
 
+def tier_dist(topq, botq, N, wrap, limit=2.0, chunk=256):
+    """建物どうしで (下端, 上端) が変わる境目までの距離 (出力のテクセル単位、テクセルの中心から)。
+    topq / botq は出力の N 倍の解像度。境目に接する画素までの距離変換を N 倍の解像度で行い、テクセルの中心で読む。
+    使うのは境目の近く (limit テクセル) だけなので、ブロックごとに処理してメモリを抑える"""
+    Hh, Wh = topq.shape
+    H, W = Hh // N, Wh // N
+    P = (int(np.ceil(limit)) + 2) * N
+    out = np.full((H, W), limit + 1.0, np.float32)
+    c = N // 2
+    for y0 in range(0, H, chunk):
+        for x0 in range(0, W, chunk):
+            h = min(chunk, H - y0); w = min(chunk, W - x0)
+            ys = np.arange(y0 * N - P, (y0 + h) * N + P); xs = np.arange(x0 * N - P, (x0 + w) * N + P)
+            ys = ys % Hh if wrap else np.clip(ys, 0, Hh - 1)
+            xs = xs % Wh if wrap else np.clip(xs, 0, Wh - 1)
+            t = topq[np.ix_(ys, xs)]; b = botq[np.ix_(ys, xs)]
+            key = np.where(t > 0, b * 256 + t, -1)
+            edge = np.zeros(key.shape, bool)
+            for sl0, sl1 in (((slice(1, None), slice(None)), (slice(None, -1), slice(None))),
+                             ((slice(None), slice(1, None)), (slice(None), slice(None, -1)))):
+                k0 = key[sl0]; k1 = key[sl1]
+                e = (k0 >= 0) & (k1 >= 0) & (k0 != k1)
+                edge[sl0] |= e; edge[sl1] |= e
+            if not edge.any():
+                continue
+            d = edt(~edge)                                   # 境目に接する画素の中心までの距離 (N 倍の画素)
+            d = d[P:P + h * N, P:P + w * N].reshape(h, N, w, N)
+            if N % 2 == 0:
+                s = d[:, c - 1:c + 1, :, c - 1:c + 1].mean(axis=(1, 3))   # 中心はちょうど画素の角 → まわりの 4 画素の平均
+            else:
+                s = d[:, c, :, c]
+            # 自分の側の、境目に接する画素の中心は境目から 0.5 画素内側 → 0.5 足すと境目までの距離
+            out[y0:y0 + h, x0:x0 + w] = np.minimum((s + 0.5) / N, limit + 1.0)
+    return out
+
+
 def nearest_fill(values, valid, wrap, P=64):
     """valid でない所を、一番近い valid の値で埋める"""
     H, W = valid.shape
@@ -287,7 +326,7 @@ def main(argv=None):
     ap.add_argument('--out', default='baked')
     ap.add_argument('--wrap', action='store_true', help='マップが上下左右にそのまま繰り返してつながる (距離をまたいで計算する)')
     ap.add_argument('--dist-scale', type=float, default=2.0, help='B が 1 テクセルあたりいくつ増えるか (既定 2 → 最大 127.5 テクセル)')
-    ap.add_argument('--alpha-width', type=float, default=2.0, help='outline が 0→1 に変わる片側の幅 (テクセル、既定 2)')
+    ap.add_argument('--scale', type=int, default=1, help='--mask がない時の top / bottom の倍率 (mask がある時は大きさの比から決める)')
     ap.add_argument('--upsample', type=int, default=4, help='輪郭を求めるときの拡大率 (既定 4)')
     ap.add_argument('--cone-scale', type=int, default=2, help='円錐マップの縮小率 (既定 2 = 半分の解像度)')
     ap.add_argument('--cone-reach', type=int, default=256, help='円錐で探す距離 (縮小後のテクセル、既定 256)')
@@ -298,39 +337,59 @@ def main(argv=None):
     os.makedirs(a.out, exist_ok=True)
 
     top = load_gray(a.top)
-    H, W = top.shape
     bottom = load_gray(a.bottom) if a.bottom else np.zeros_like(top)
-    cov = load_gray(a.mask) / 255.0 if a.mask else (top > 0).astype(np.float32)
-    for name, arr in (('bottom', bottom), ('mask', cov)):
-        if arr.shape != top.shape:
-            sys.exit(f'{name} の大きさ {arr.shape[::-1]} が top {top.shape[::-1]} と違います')
-    if not a.mask:
-        print('注意: --mask がないので、輪郭はテクセル単位の階段になります')
+    if bottom.shape != top.shape:
+        sys.exit(f'bottom の大きさ {bottom.shape[::-1]} が top {top.shape[::-1]} と違います')
+    # 出力の解像度と、top / bottom の倍率 N (top / bottom だけ N 倍の解像度で渡せる。段の輪郭が 1/N テクセルの細かさになる)
+    if a.mask:
+        cov = load_gray(a.mask) / 255.0
+        H, W = cov.shape
+        N = top.shape[0] // H
+        if N < 1 or top.shape != (H * N, W * N):
+            sys.exit(f'top {top.shape[::-1]} が mask {cov.shape[::-1]} の整数倍になっていません')
+    else:
+        N = a.scale
+        if top.shape[0] % N or top.shape[1] % N:
+            sys.exit(f'top の大きさが --scale {N} で割り切れません')
+        H, W = top.shape[0] // N, top.shape[1] // N
+        cov = (top > 0).reshape(H, N, W, N).mean(axis=(1, 3)).astype(np.float32)    # N 倍なら縁の割合がアンチエイリアスになる
+        if N == 1:
+            print('注意: --mask がないので、外側の輪郭はテクセル単位の階段になります')
+    if N > 1:
+        print(f'top / bottom は出力の {N} 倍の解像度として読みます ({W * N} x {H * N} → {W} x {H})')
 
     # ---- 1. 高さを 4 の倍数にそろえる (ASTC で ±1 ずれても、読むときに丸めて戻せる) ----
     def snap4(v):
         return np.clip(np.round(v / 4) * 4, 0, 252)
-    topq = np.where(top > 0, np.maximum(snap4(top), 4), 0)
-    botq = np.where(top > 0, snap4(bottom), 0)
+    topq = np.where(top > 0, np.maximum(snap4(top), 4), 0).astype(np.int32)
+    botq = np.where(top > 0, snap4(bottom), 0).astype(np.int32)
     botq = np.minimum(botq, np.maximum(topq - 4, 0))
     moved = int(((top > 0) & (topq != np.round(top))).sum())
+    del top, bottom
     if moved:
-        print(f'高さを 4 の倍数にそろえました ({moved} テクセル)')
+        print(f'高さを 4 の倍数にそろえました ({moved} 画素)')
 
-    # ---- 2. なめらかな輪郭 (符号付き距離、テクセル単位) ----
+    # ---- 2. 外側の輪郭 (符号付き距離、テクセル単位。マスクのアンチエイリアスから) ----
     sd = fine_sdf(cov, a.wrap, up=a.upsample)
 
-    # ---- 3. data の R / G:輪郭に少しでもかかるテクセルを建物にする (外側 0.75 テクセルまで) ----
-    solid = sd < 0.75
-    has = topq > 0
+    # ---- 3. data の R / G:テクセルの中心で決める (膨らませない) ----
+    #   中心が外側の輪郭の内側なら建物。高さは中心の画素の値 (外れていれば一番近い建物の値)
+    solid = sd < 0.0
+    c = N // 2
+    topc = topq[c::N, c::N]; botc = botq[c::N, c::N]
+    has = topc > 0
     if not has.any():
         sys.exit('top に建物がありません')
-    topf = nearest_fill(topq, has, a.wrap)          # 広げたテクセルには一番近い建物の高さを入れる
-    botf = nearest_fill(botq, has, a.wrap)
+    topf = nearest_fill(topc, has, a.wrap)
+    botf = nearest_fill(botc, has, a.wrap)
     R = np.where(solid, botf, EMPTY).astype(np.int32)
     G = np.where(solid, topf, 0).astype(np.int32)
 
-    # ---- 4. data の B:同じ (R, G) の領域ごとに、境界までの距離 ----
+    # ---- 4. 段の境目 (建物どうしで (R, G) が変わる所) までの距離 (テクセル単位、N 倍の解像度で求める) ----
+    dtier = tier_dist(topq, botq, N, a.wrap)
+    del topq, botq
+
+    # ---- 5. data の B:同じ (R, G) の領域ごとに、境界までの距離 ----
     key = R * 256 + G
     maxd = 255.0 / a.dist_scale
     P = int(maxd) + 2
@@ -340,9 +399,10 @@ def main(argv=None):
         d = edt(kp == k)[P:P + H, P:P + W]
         m = key == k
         dist[m] = d[m]
-    B = np.clip(np.floor(np.maximum(dist - 1.0, 0) * a.dist_scale), 0, 255)   # 少し小さめ (安全側)
+    # 少し小さめ (安全側)。輪郭はテクセルの中心どうしの間 (隣のテクセルとの補間) にあるので、その分 (√2 + 0.7) を引く
+    B = np.clip(np.floor(np.maximum(dist - 2.25, 0) * a.dist_scale), 0, 255)
 
-    # ---- 5. 円錐マップ:自分より高い建物までの距離 ÷ 高さの差 の最小 (縮小した解像度) ----
+    # ---- 6. 円錐マップ:自分より高い建物までの距離 ÷ 高さの差 の最小 (縮小した解像度) ----
     F = a.cone_scale
     if H % F or W % F:
         sys.exit(f'マップの大きさが --cone-scale {F} で割り切れません')
@@ -351,8 +411,11 @@ def main(argv=None):
     base = topz.reshape(nh, F, nw, F).min(axis=(1, 3)) / 255.0          # 区画の中の一番低い所
     reach = a.cone_reach
     kmin = np.full((nh, nw), np.inf)
+    # 建物は中心から最大 0.71 テクセル外まで広がるので、1 テクセル膨らませてから探す (安全側)
     for lv in np.unique(G[R < EMPTY]):
-        feat = ((R < EMPTY) & (G == lv)).reshape(nh, F, nw, F).any(axis=(1, 3))
+        lvm = (R < EMPTY) & (G == lv)
+        lvm = lvm | pad(lvm, 1, a.wrap)[:-2, 1:-1] | pad(lvm, 1, a.wrap)[2:, 1:-1] | pad(lvm, 1, a.wrap)[1:-1, :-2] | pad(lvm, 1, a.wrap)[1:-1, 2:]
+        feat = lvm.reshape(nh, F, nw, F).any(axis=(1, 3))
         fp = pad(feat, reach, a.wrap) if a.wrap else np.pad(feat, reach)
         d = edt(~fp)[reach:reach + nh, reach:reach + nw]
         d = np.minimum(d, reach)                                          # 探す範囲の外は「その距離にある」とみなす (安全側)
@@ -363,8 +426,11 @@ def main(argv=None):
     kf = np.where(np.isinf(kmin), 0.0, kmin)
     cone = np.where(np.isinf(kmin), 254, np.minimum(np.floor(255 * kf / (kf + 0.1)), 254))
 
-    # ---- 6. 輪郭 (outline、1 チャンネル) と、壁の色を置く範囲 ----
-    A = np.clip(0.5 - sd / (2 * a.alpha_width), 0, 1) * 255
+    # ---- 7. 輪郭 (outline、1 チャンネル):一番近い境界までの距離 (符号なし、0〜2 テクセル → 0〜255) ----
+    #   境界は外側の輪郭と、段の境目 (塔と基壇、高架の床と柱など) のどちらも。
+    #   符号はシェーダーが高さごとに data から付けるので、どの高さでもその高さの輪郭がなめらかに出る
+    v = np.minimum(np.abs(sd), dtier)
+    A = np.clip(v / 2.0, 0, 1) * 255
     wall = (sd < -1.5) & (R == 0)                                        # 地面から立つ物の、輪郭より 1.5 テクセル内側
 
     outs = {'data_R': R, 'data_G': G, 'data_B': B, 'outline': A, 'cone': cone, 'wall_mask': wall * 255}

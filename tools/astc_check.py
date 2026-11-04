@@ -11,14 +11,14 @@ ASTC を PNG に戻したもの (astcenc -dl で復元したもの) と、変換
 --kind
   data     R 下端 / G 上端 / B 距離 (city_bake.py の data_R/G/B を格納したもの)
   cone     円錐ステップ値 (1 チャンネル)
-  outline  なめらかな輪郭 (1 チャンネル)
+  outline  一番近い境界までの距離 (1 チャンネル)
 
 シェーダー (city_tile_fn.glsl) が許せる範囲
   data R : 空き地 (255) が 250 以上のまま、それ以外は ±1 以内
   data G : ±1 以内 (4 の倍数に丸めて元に戻る)
   data B : 大きく戻る量が 6 コード以内 (ASTC_SAFE で 6 コード小さく読むため)
   cone   : 大きく戻る量が 6 コード以内
-  outline: 輪郭のずれが 0.25 テクセル以内 (目安。1 テクセル = 63.75 コード)
+  outline: 境界の近く (2 テクセル以内) で距離のずれが 0.25 テクセル以内 (目安。1 テクセル = 127.5 コード)
 """
 import argparse, os, sys
 import numpy as np
@@ -66,8 +66,8 @@ def main(argv=None):
             over = (v1 - v0).max()
             report('cone', over <= 6, f'大きく戻った量 最大 {over:.1f} コード (6 以内が必要)')
         else:
-            band = (v0 > 0) & (v0 < 255)
-            e = np.abs(v1 - v0)[band] / 63.75 if band.any() else np.zeros(1)
+            band = v0 < 255
+            e = np.abs(v1 - v0)[band] / 127.5 if band.any() else np.zeros(1)
             report('outline', e.max() <= 0.25, f'輪郭のずれ 99% {np.percentile(e, 99):.3f} / 最大 {e.max():.3f} テクセル (0.25 以内が目安)')
 
     # よくある原因の見分け:全体が一方向にずれている → sRGB で変換・復元している

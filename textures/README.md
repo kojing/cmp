@@ -16,7 +16,7 @@
 | `tile?_roof.png` | `uCityRoof` | RGB 屋根の色 (建物の外は一番近い屋根の色で埋めてある) | LINEAR、ミップあり、sRGB 可 |
 | `tile?_ground.png` | `uCityGround` | RGB 地面の色。建物の中 (輪郭の 1.5 テクセル内側) は壁の色 | LINEAR、ミップあり、sRGB 可 |
 | `tile?_cone.png` | `uCityCone` | 1 チャンネル。円錐ステップ値 | NEAREST、ミップなし、リニア |
-| `tile?_outline.png` | `uCityOutline` | 1 チャンネル。なめらかな輪郭 (0.5 = 輪郭) | LINEAR、ミップなし、リニア |
+| `tile?_outline.png` | `uCityOutline` | 1 チャンネル。一番近い境界までの距離 (外側の輪郭と段の境目、2 テクセルで 255) | ミップなし、リニア (texelFetch で読む) |
 
 ラップはどれも CLAMP。シェーダーの値は `TEX_CORE = 1024`、`TEX_SIZE = 1408`、`DIST_SCALE = 2`、`CONE_MAP_W = 2048` です。
 デモではこのテクスチャを 1 枚 2000 × 2000 のポリゴンに貼っています (ズーム 1 で 1 テクセル ≒ 1.95 ピクセル)。

@@ -26,6 +26,9 @@ import os; os.makedirs('input', exist_ok=True)
 Image.fromarray((cov * 255 + 0.5).astype(np.uint8)).save('input/mask.png')
 Image.fromarray(top.astype(np.uint8)).save('input/top.png')
 Image.fromarray(bot.astype(np.uint8)).save('input/bottom.png')
+# 2 倍の解像度の top / bottom (段の輪郭をテクセルより細かくするため。mask は 1 倍のまま)
+Image.fromarray(np.where(solid, data[..., 1], 0).astype(np.uint8)).save('input/top2x.png')
+Image.fromarray(np.where(solid & (data[..., 0] > 0), data[..., 0], 0).astype(np.uint8)).save('input/bottom2x.png')
 print('input ok')
 
 # ---------------- 屋根 ----------------
