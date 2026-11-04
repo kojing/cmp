@@ -64,6 +64,9 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
     <button id="snap" aria-pressed="true">高さを丸める</button>
     <button id="shg" aria-pressed="true">落ち影 (地面)</button>
     <button id="side" aria-pressed="true">側面の陰影</button>
+    <label style="flex-direction:row;align-items:center;gap:8px">デバッグ表示
+      <select id="dbgv"><option value="0">通常</option><option value="1">1 data G (高さ)</option><option value="2">2 data B (距離)</option>
+      <option value="3">3 outline</option><option value="4">4 cone</option><option value="5">5 視点のぶれ</option><option value="6">6 レイの歩数</option></select></label>
     <button id="half" aria-pressed="false">UV を 16bit で渡す (再現)</button>
     <button id="pass" aria-pressed="false">画面とポリゴンの大きさを渡す</button>
     <button id="grid" aria-pressed="true">ポリゴン矩形</button>
@@ -143,6 +146,11 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     bool  ASTC_SAFE    = true;    // ASTC 対策:距離 B と円錐を 6 コード小さく読む
     bool  HEIGHT_SNAP  = true;    // ASTC 対策:高さ R/G を 4 の倍数に丸めて読む
     bool  SHOW_STARVED = false;   // デバッグ:マージン不足の所を赤く
+    int   DEBUG_VIEW   = 0;       // デバッグ表示 (ノイズの出所を探す):0 = 通常
+                                  //   1 = data G (上端の高さ)  2 = data B (距離)  3 = outline  4 = cone
+                                  //      ※1〜4 はポリゴンの地面の位置をそのまま真上から見た値。ここがざらつけばテクスチャ側の問題
+                                  //   5 = 視点のぶれ (黒なら正常)。白っぽければ UV か微分の問題 (関数を if の中で呼んでいる、UV の精度など)
+                                  //   6 = レイの歩数 (青 = 少ない → 赤 = 上限)。点々と赤ければ進み方の問題
 
     // ---- マッピング (ポリゴンとテクスチャの対応) ----
     // ポリゴン UV 0..1 が、テクスチャのうちマージンを除いた TEX_CORE の範囲に対応する。
@@ -210,6 +218,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp vec2  eyeUV  = polyUV + J * (eyePx - fragPx);                  // 視点の真下 (ポリゴン UV)
     highp float eyeH   = 0.5 * res.y / tan(0.5 * fov);                   // 視点の高さ (画面のピクセル)
     highp vec3  eye    = vec3(MARGIN + eyeUV * TEX_CORE, eyeH * texPerPx);   // 視点 (テクセル)
+    highp float eyeJitter = length(fwidth(eye));                    // デバッグ用:視点は 1 枚の中で一定のはず (隣のピクセルとの差)
 
     // ---- ASTC 4x4 対策 ----
     // 距離 B と円錐は「大きく復元」されると建物を飛び越えるので、6 コード小さく読む
@@ -222,6 +231,16 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp float KEY_TOL  = SNAP > 0.5 ? 0.5 / 255.0 : safeRead ? 1.5 / 255.0 : 0.5 / 255.0;
 
     highp float coneSc = float(textureSize(uCityCone, 0).x) / S.x;
+    // ---- デバッグ表示 1〜5 (レイを飛ばさずに入力をそのまま見る) ----
+    if (DEBUG_VIEW >= 1 && DEBUG_VIEW <= 5) {
+        highp vec4 dd = texelFetch(uCityData, ivec2(clamp(floor(P * dSc), vec2(0.0), dRes - 1.0)), 0);
+        highp float v = DEBUG_VIEW == 1 ? dd.g * (255.0 / 192.0) : DEBUG_VIEW == 2 ? dd.b
+                      : DEBUG_VIEW == 3 ? textureLod(uCityOutline, P / S, 0.0).r
+                      : texelFetch(uCityCone, ivec2(clamp(floor(P * coneSc), vec2(0.0), S * coneSc - 1.0)), 0).r;
+        if (DEBUG_VIEW == 5) return vec4(vec3(clamp(eyeJitter * 10.0, 0.0, 1.0)), 1.0);   // 黒 = 一定、白 = 0.1 テクセル以上ぶれる
+        return vec4(vec3(v), 1.0);
+    }
+    int stepsUsed = 0;
     bool starved = false;                       // マージンが足りず、視線の始まりがテクスチャの外
     highp vec3 col;
     {
@@ -246,6 +265,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
         highp vec3 hit  = vec3(Ps, 0.0);
         highp float tPrev = t;                            // 直前の (外側だった) 位置
         for (int i = 0; i < STEPS; i++) {
+            stepsUsed = i;
             if (t >= 1.0) break;
             highp vec3 p  = eye + D * t;
             highp vec4 d  = texelFetch(uCityData, ivec2(clamp(floor((p.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
@@ -427,6 +447,10 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
 
     }
     if ((flags & 4) != 0 && starved) col = mix(col, vec3(0.9, 0.15, 0.1), 0.45);
+    if (DEBUG_VIEW == 6) {
+        highp float k = float(stepsUsed) / float(STEPS - 1);
+        col = mix(vec3(0.1, 0.2, 0.9), vec3(0.95, 0.15, 0.1), k) * (0.4 + 0.6 * k) + 0.05;
+    }
     return vec4(col, 1.0);
 }
 </script>
@@ -454,8 +478,9 @@ const FN_DEMO = [
   ['SHOW_STARVED', '(int(uDemoView.w + 0.5) & 4) != 0'], ['ASTC_SAFE', '(int(uDemoView.w + 0.5) & 8) != 0'],
   ['HEIGHT_SNAP', '(int(uDemoView.w + 0.5) & 16) != 0'],
   ['SCREEN_W_PX', 'uDemoPx.x'], ['SCREEN_H_PX', 'uDemoPx.y'], ['POLY_PX', 'uDemoPx.z'],
+  ['DEBUG_VIEW', 'uDemoDebug'],
   ['TEX_CORE', 'uDemoTex.x'], ['TEX_SIZE', 'uDemoTex.y'],
-].reduce((src, [name, expr]) => src.replace(new RegExp('((?:float|bool)\\s+' + name + '\\s*=\\s*)[^;]+;'), '$1' + expr + ';'), FN);
+].reduce((src, [name, expr]) => src.replace(new RegExp('((?:float|bool|int)\\s+' + name + '\\s*=\\s*)[^;]+;'), '$1' + expr + ';'), FN);
 const cv = document.getElementById('c'), err = document.getElementById('err');
 const gl = cv.getContext('webgl2', {antialias:false});
 if (!gl) { err.textContent = 'この端末では WebGL2 が使えません。'; throw 0; }
@@ -509,6 +534,7 @@ uniform sampler2D uCityData, uCityRoof, uCityGround, uCityCone, uCityOutline;
 uniform vec4 uDemoView;          // 画角, 視点のずれ, 建物の高さ, フラグ
 uniform vec2 uDemoTex;           // TEX_CORE, TEX_SIZE (マージンの選択で変わる)
 uniform bool uHalfUV;            // デモ:UV を 16bit に落として渡す
+uniform int  uDemoDebug;         // デモ:DEBUG_VIEW
 uniform vec3 uDemoPx;            // デモ:SCREEN_W_PX, SCREEN_H_PX, POLY_PX (0 なら微分から)
 uniform vec2 uDemoLight;         // 光の方位, 光の高さ (度)
 in vec2 vPoly;
@@ -584,7 +610,7 @@ function buildTiles() {
 }
 
 // ---- 状態と UI ----
-const st = {half:false, pass:false, laz:241, lel:65, astc:true, safe:true, snap:true, zoom:Math.pow(2, -2.25), fov:20, h:.25, off:-.4, shg:true, side:true, grid:true, starve:false,
+const st = {dbg:0, half:false, pass:false, laz:241, lel:65, astc:true, safe:true, snap:true, zoom:Math.pow(2, -2.25), fov:20, h:.25, off:-.4, shg:true, side:true, grid:true, starve:false,
             auto:!matchMedia('(prefers-reduced-motion: reduce)').matches, cx:2000, cy:1094, vx:0, vy:0};
 const $ = id => document.getElementById(id);
 function labels() {
@@ -600,6 +626,7 @@ $('la').oninput = () => { st.laz = +$('la').value; labels(); };
 $('le').oninput = () => { st.lel = +$('le').value; labels(); };
 $('m').onchange = () => { margin = +$('m').value; buildTiles(); };
 const tog = (id, k) => { const b = $(id); b.setAttribute('aria-pressed', st[k]); b.onclick = () => { st[k] = !st[k]; b.setAttribute('aria-pressed', st[k]); }; };
+$('dbgv').onchange = () => { st.dbg = +$('dbgv').value; };
 tog('half', 'half'); tog('pass', 'pass'); tog('safe', 'safe'); tog('snap', 'snap');
 { const b = $('astc'); b.setAttribute('aria-pressed', st.astc); b.onclick = () => { st.astc = !st.astc; b.setAttribute('aria-pressed', st.astc); if (IMG) buildTiles(); }; }
 tog('shg', 'shg'); tog('side', 'side'); tog('grid', 'grid'); tog('starve', 'starve'); tog('auto', 'auto');
@@ -675,7 +702,7 @@ function frame(ts) {
   gl.uniform2f(u.uCam, st.cx, st.cy); gl.uniform1f(u.uZoom, st.zoom); gl.uniform2f(u.uRes, w, h);
   gl.uniform1f(u.uCore, POLY); gl.uniform2f(u.uScreen, w, h);
   gl.uniform2f(u.uDemoTex, CORE, CORE + 2 * margin);
-  gl.uniform1i(u.uHalfUV, st.half ? 1 : 0);
+  gl.uniform1i(u.uHalfUV, st.half ? 1 : 0); gl.uniform1i(u.uDemoDebug, st.dbg);
   gl.uniform3f(u.uDemoPx, st.pass ? w : 0, st.pass ? h : 0, st.pass ? POLY * st.zoom : 0);
   gl.uniform2f(u.uDemoLight, st.laz, st.lel);
   gl.uniform4f(u.uDemoView, st.fov, st.off, st.h,

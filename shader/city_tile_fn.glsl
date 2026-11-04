@@ -65,6 +65,11 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     bool  ASTC_SAFE    = true;    // ASTC 対策:距離 B と円錐を 6 コード小さく読む
     bool  HEIGHT_SNAP  = true;    // ASTC 対策:高さ R/G を 4 の倍数に丸めて読む
     bool  SHOW_STARVED = false;   // デバッグ:マージン不足の所を赤く
+    int   DEBUG_VIEW   = 0;       // デバッグ表示 (ノイズの出所を探す):0 = 通常
+                                  //   1 = data G (上端の高さ)  2 = data B (距離)  3 = outline  4 = cone
+                                  //      ※1〜4 はポリゴンの地面の位置をそのまま真上から見た値。ここがざらつけばテクスチャ側の問題
+                                  //   5 = 視点のぶれ (黒なら正常)。白っぽければ UV か微分の問題 (関数を if の中で呼んでいる、UV の精度など)
+                                  //   6 = レイの歩数 (青 = 少ない → 赤 = 上限)。点々と赤ければ進み方の問題
 
     // ---- マッピング (ポリゴンとテクスチャの対応) ----
     // ポリゴン UV 0..1 が、テクスチャのうちマージンを除いた TEX_CORE の範囲に対応する。
@@ -132,6 +137,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp vec2  eyeUV  = polyUV + J * (eyePx - fragPx);                  // 視点の真下 (ポリゴン UV)
     highp float eyeH   = 0.5 * res.y / tan(0.5 * fov);                   // 視点の高さ (画面のピクセル)
     highp vec3  eye    = vec3(MARGIN + eyeUV * TEX_CORE, eyeH * texPerPx);   // 視点 (テクセル)
+    highp float eyeJitter = length(fwidth(eye));                    // デバッグ用:視点は 1 枚の中で一定のはず (隣のピクセルとの差)
 
     // ---- ASTC 4x4 対策 ----
     // 距離 B と円錐は「大きく復元」されると建物を飛び越えるので、6 コード小さく読む
@@ -144,6 +150,16 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp float KEY_TOL  = SNAP > 0.5 ? 0.5 / 255.0 : safeRead ? 1.5 / 255.0 : 0.5 / 255.0;
 
     highp float coneSc = float(textureSize(uCityCone, 0).x) / S.x;
+    // ---- デバッグ表示 1〜5 (レイを飛ばさずに入力をそのまま見る) ----
+    if (DEBUG_VIEW >= 1 && DEBUG_VIEW <= 5) {
+        highp vec4 dd = texelFetch(uCityData, ivec2(clamp(floor(P * dSc), vec2(0.0), dRes - 1.0)), 0);
+        highp float v = DEBUG_VIEW == 1 ? dd.g * (255.0 / 192.0) : DEBUG_VIEW == 2 ? dd.b
+                      : DEBUG_VIEW == 3 ? textureLod(uCityOutline, P / S, 0.0).r
+                      : texelFetch(uCityCone, ivec2(clamp(floor(P * coneSc), vec2(0.0), S * coneSc - 1.0)), 0).r;
+        if (DEBUG_VIEW == 5) return vec4(vec3(clamp(eyeJitter * 10.0, 0.0, 1.0)), 1.0);   // 黒 = 一定、白 = 0.1 テクセル以上ぶれる
+        return vec4(vec3(v), 1.0);
+    }
+    int stepsUsed = 0;
     bool starved = false;                       // マージンが足りず、視線の始まりがテクスチャの外
     highp vec3 col;
     {
@@ -168,6 +184,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
         highp vec3 hit  = vec3(Ps, 0.0);
         highp float tPrev = t;                            // 直前の (外側だった) 位置
         for (int i = 0; i < STEPS; i++) {
+            stepsUsed = i;
             if (t >= 1.0) break;
             highp vec3 p  = eye + D * t;
             highp vec4 d  = texelFetch(uCityData, ivec2(clamp(floor((p.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
@@ -349,5 +366,9 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
 
     }
     if ((flags & 4) != 0 && starved) col = mix(col, vec3(0.9, 0.15, 0.1), 0.45);
+    if (DEBUG_VIEW == 6) {
+        highp float k = float(stepsUsed) / float(STEPS - 1);
+        col = mix(vec3(0.1, 0.2, 0.9), vec3(0.95, 0.15, 0.1), k) * (0.4 + 0.6 * k) + 0.05;
+    }
     return vec4(col, 1.0);
 }
