@@ -74,11 +74,14 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp float TEX_SIZE     = 1408.0;  // マージン込みのテクスチャ全体の大きさ (= TEX_CORE + 2 × 片側マージン)
 
     // ---- 画面とポリゴンの大きさ (省略可) ----
-    // 0 のままなら UV の画面上の微分から求める。UV の精度が低い (half / mediump) と微分が乱れ、
-    // 視点の位置がピクセルごとにぶれて影や起伏にノイズが出る。分かっている時は値を入れると微分を使わない
+    // 0 のままなら UV の画面上の微分から求める。UV の精度が低い (16bit) と微分が乱れる。
+    //   SCREEN_*_PX:16bit の UV では必ず入れる (視点の位置が画面の大きさで決まるため)
+    //   POLY_PX     :入れるとミップの選び方も安定する (入れなくても形は崩れない)
     highp float SCREEN_W_PX  = 0.0;     // 画面の幅 (ピクセル)
     highp float SCREEN_H_PX  = 0.0;     // 画面の高さ (ピクセル)
     highp float POLY_PX      = 0.0;     // ポリゴン 1 枚の画面上の大きさ (ピクセル、ズーム込み。回転なしの正方形)
+    bool  POLY_ROTATED = false;   // ポリゴンを画面上で回転させる時だけ true。false なら UV の微分は向き (符号) だけを使い、
+                                  // 視線の向きを画面の位置だけから決める (UV が 16bit でも視線がぶれない)
 
     // ---- 定数 (タイルの作り方に合わせる。city_bake.py の出力に表示される値) ----
     const highp float DIST_SCALE   = 2.0;            // data の B が 1 テクセルあたりいくつ増えるか
@@ -104,7 +107,15 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp vec2 res = vec2(1.0 / max(abs(sdx.x), 1e-9), 1.0 / max(abs(sdy.y), 1e-9));   // 画面の解像度 (px)
     highp mat2 J   = mat2(pdx, pdy);                                     // 1 ピクセル動いた時のポリゴン UV の変化
     if (SCREEN_W_PX > 0.0) res = vec2(SCREEN_W_PX, SCREEN_H_PX);
-    if (POLY_PX > 0.0) J = mat2((pdx.x < 0.0 ? -1.0 : 1.0) / POLY_PX, 0.0, 0.0, (pdy.y < 0.0 ? -1.0 : 1.0) / POLY_PX);
+    // 1 ピクセルあたりのポリゴン UV の大きさ。分かっていれば POLY_PX から、なければ微分から
+    highp float sc = POLY_PX > 0.0 ? 1.0 / POLY_PX : 0.5 * (abs(pdx.x) + abs(pdy.y));
+    if (!POLY_ROTATED) {
+        // 回転なし:向き (符号) だけを微分から取る。視点の位置と高さはどちらも sc に比例するので、
+        // 視線の向き (= 絵) は sc に依存しない。sc の乱れが効くのはミップの選び方だけになる
+        J = mat2(pdx.x < 0.0 ? -sc : sc, 0.0, 0.0, pdy.y < 0.0 ? -sc : sc);
+    } else if (POLY_PX > 0.0) {
+        J *= sc / sqrt(abs(determinant(J)));
+    }
     highp float texPerPx = sqrt(abs(determinant(J))) * TEX_CORE;             // 1 ピクセルあたりのテクセル数 (= 1 / ズーム)
     highp float lod      = max(log2(texPerPx), 0.0);
 

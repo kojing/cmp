@@ -64,6 +64,8 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
     <button id="snap" aria-pressed="true">高さを丸める</button>
     <button id="shg" aria-pressed="true">落ち影 (地面)</button>
     <button id="side" aria-pressed="true">側面の陰影</button>
+    <button id="half" aria-pressed="false">UV を 16bit で渡す (再現)</button>
+    <button id="pass" aria-pressed="false">画面とポリゴンの大きさを渡す</button>
     <button id="grid" aria-pressed="true">ポリゴン矩形</button>
     <button id="starve" aria-pressed="false">マージン不足を表示</button>
     <button id="auto" aria-pressed="true">自動スクロール</button>
@@ -150,11 +152,14 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp float TEX_SIZE     = 1408.0;  // マージン込みのテクスチャ全体の大きさ (= TEX_CORE + 2 × 片側マージン)
 
     // ---- 画面とポリゴンの大きさ (省略可) ----
-    // 0 のままなら UV の画面上の微分から求める。UV の精度が低い (half / mediump) と微分が乱れ、
-    // 視点の位置がピクセルごとにぶれて影や起伏にノイズが出る。分かっている時は値を入れると微分を使わない
+    // 0 のままなら UV の画面上の微分から求める。UV の精度が低い (16bit) と微分が乱れる。
+    //   SCREEN_*_PX:16bit の UV では必ず入れる (視点の位置が画面の大きさで決まるため)
+    //   POLY_PX     :入れるとミップの選び方も安定する (入れなくても形は崩れない)
     highp float SCREEN_W_PX  = 0.0;     // 画面の幅 (ピクセル)
     highp float SCREEN_H_PX  = 0.0;     // 画面の高さ (ピクセル)
     highp float POLY_PX      = 0.0;     // ポリゴン 1 枚の画面上の大きさ (ピクセル、ズーム込み。回転なしの正方形)
+    bool  POLY_ROTATED = false;   // ポリゴンを画面上で回転させる時だけ true。false なら UV の微分は向き (符号) だけを使い、
+                                  // 視線の向きを画面の位置だけから決める (UV が 16bit でも視線がぶれない)
 
     // ---- 定数 (タイルの作り方に合わせる。city_bake.py の出力に表示される値) ----
     const highp float DIST_SCALE   = 2.0;            // data の B が 1 テクセルあたりいくつ増えるか
@@ -180,7 +185,15 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     highp vec2 res = vec2(1.0 / max(abs(sdx.x), 1e-9), 1.0 / max(abs(sdy.y), 1e-9));   // 画面の解像度 (px)
     highp mat2 J   = mat2(pdx, pdy);                                     // 1 ピクセル動いた時のポリゴン UV の変化
     if (SCREEN_W_PX > 0.0) res = vec2(SCREEN_W_PX, SCREEN_H_PX);
-    if (POLY_PX > 0.0) J = mat2((pdx.x < 0.0 ? -1.0 : 1.0) / POLY_PX, 0.0, 0.0, (pdy.y < 0.0 ? -1.0 : 1.0) / POLY_PX);
+    // 1 ピクセルあたりのポリゴン UV の大きさ。分かっていれば POLY_PX から、なければ微分から
+    highp float sc = POLY_PX > 0.0 ? 1.0 / POLY_PX : 0.5 * (abs(pdx.x) + abs(pdy.y));
+    if (!POLY_ROTATED) {
+        // 回転なし:向き (符号) だけを微分から取る。視点の位置と高さはどちらも sc に比例するので、
+        // 視線の向き (= 絵) は sc に依存しない。sc の乱れが効くのはミップの選び方だけになる
+        J = mat2(pdx.x < 0.0 ? -sc : sc, 0.0, 0.0, pdy.y < 0.0 ? -sc : sc);
+    } else if (POLY_PX > 0.0) {
+        J *= sc / sqrt(abs(determinant(J)));
+    }
     highp float texPerPx = sqrt(abs(determinant(J))) * TEX_CORE;             // 1 ピクセルあたりのテクセル数 (= 1 / ズーム)
     highp float lod      = max(log2(texPerPx), 0.0);
 
@@ -440,6 +453,7 @@ const FN_DEMO = [
   ['DROP_SHADOW', '(int(uDemoView.w + 0.5) & 1) != 0'], ['SIDE_SHADE', '(int(uDemoView.w + 0.5) & 2) != 0'],
   ['SHOW_STARVED', '(int(uDemoView.w + 0.5) & 4) != 0'], ['ASTC_SAFE', '(int(uDemoView.w + 0.5) & 8) != 0'],
   ['HEIGHT_SNAP', '(int(uDemoView.w + 0.5) & 16) != 0'],
+  ['SCREEN_W_PX', 'uDemoPx.x'], ['SCREEN_H_PX', 'uDemoPx.y'], ['POLY_PX', 'uDemoPx.z'],
   ['TEX_CORE', 'uDemoTex.x'], ['TEX_SIZE', 'uDemoTex.y'],
 ].reduce((src, [name, expr]) => src.replace(new RegExp('((?:float|bool)\\s+' + name + '\\s*=\\s*)[^;]+;'), '$1' + expr + ';'), FN);
 const cv = document.getElementById('c'), err = document.getElementById('err');
@@ -494,12 +508,16 @@ uniform sampler2D uCityData, uCityRoof, uCityGround, uCityCone, uCityOutline;
 // デモだけ:関数の中の調整値を、スライダーの uniform に差し替えて使う (JS で文字列を置き換える)
 uniform vec4 uDemoView;          // 画角, 視点のずれ, 建物の高さ, フラグ
 uniform vec2 uDemoTex;           // TEX_CORE, TEX_SIZE (マージンの選択で変わる)
+uniform bool uHalfUV;            // デモ:UV を 16bit に落として渡す
+uniform vec3 uDemoPx;            // デモ:SCREEN_W_PX, SCREEN_H_PX, POLY_PX (0 なら微分から)
 uniform vec2 uDemoLight;         // 光の方位, 光の高さ (度)
 in vec2 vPoly;
 out vec4 fragColor;
 ${FN_DEMO}
 void main() {
-  fragColor = cityTile(gl_FragCoord.xy / uScreen, vPoly);
+  vec2 su = gl_FragCoord.xy / uScreen, pu = vPoly;
+  if (uHalfUV) { su = unpackHalf2x16(packHalf2x16(su)); pu = unpackHalf2x16(packHalf2x16(pu)); }   // 16bit の UV を再現
+  fragColor = cityTile(su, pu);
 }`);
 
 const quad = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, quad);
@@ -566,7 +584,7 @@ function buildTiles() {
 }
 
 // ---- 状態と UI ----
-const st = {laz:241, lel:65, astc:true, safe:true, snap:true, zoom:Math.pow(2, -2.25), fov:20, h:.25, off:-.4, shg:true, side:true, grid:true, starve:false,
+const st = {half:false, pass:false, laz:241, lel:65, astc:true, safe:true, snap:true, zoom:Math.pow(2, -2.25), fov:20, h:.25, off:-.4, shg:true, side:true, grid:true, starve:false,
             auto:!matchMedia('(prefers-reduced-motion: reduce)').matches, cx:2000, cy:1094, vx:0, vy:0};
 const $ = id => document.getElementById(id);
 function labels() {
@@ -582,7 +600,7 @@ $('la').oninput = () => { st.laz = +$('la').value; labels(); };
 $('le').oninput = () => { st.lel = +$('le').value; labels(); };
 $('m').onchange = () => { margin = +$('m').value; buildTiles(); };
 const tog = (id, k) => { const b = $(id); b.setAttribute('aria-pressed', st[k]); b.onclick = () => { st[k] = !st[k]; b.setAttribute('aria-pressed', st[k]); }; };
-tog('safe', 'safe'); tog('snap', 'snap');
+tog('half', 'half'); tog('pass', 'pass'); tog('safe', 'safe'); tog('snap', 'snap');
 { const b = $('astc'); b.setAttribute('aria-pressed', st.astc); b.onclick = () => { st.astc = !st.astc; b.setAttribute('aria-pressed', st.astc); if (IMG) buildTiles(); }; }
 tog('shg', 'shg'); tog('side', 'side'); tog('grid', 'grid'); tog('starve', 'starve'); tog('auto', 'auto');
 const setAuto = v => { st.auto = v; $('auto').setAttribute('aria-pressed', v); };
@@ -657,6 +675,8 @@ function frame(ts) {
   gl.uniform2f(u.uCam, st.cx, st.cy); gl.uniform1f(u.uZoom, st.zoom); gl.uniform2f(u.uRes, w, h);
   gl.uniform1f(u.uCore, POLY); gl.uniform2f(u.uScreen, w, h);
   gl.uniform2f(u.uDemoTex, CORE, CORE + 2 * margin);
+  gl.uniform1i(u.uHalfUV, st.half ? 1 : 0);
+  gl.uniform3f(u.uDemoPx, st.pass ? w : 0, st.pass ? h : 0, st.pass ? POLY * st.zoom : 0);
   gl.uniform2f(u.uDemoLight, st.laz, st.lel);
   gl.uniform4f(u.uDemoView, st.fov, st.off, st.h,
     (st.shg ? 1 : 0) | (st.side ? 2 : 0) | (st.starve ? 4 : 0) | (st.safe ? 8 : 0) | (st.snap ? 16 : 0));
