@@ -14,6 +14,7 @@
 |---|---|
 | `shader/city_tile_fn.glsl` | 描画関数 `cityTile(screenUV, polyUV)`。引数は 2 つの UV だけ、サンプラーは外のコードで宣言する |
 | `tools/city_bake.py` | 高さの画像と建物マスクから、各チャンネル (data R/G/B、outline、cone ほか) を作るツール。numpy だけで動く (Houdini の Python でも可) |
+| `tools/astc_check.py` | ASTC に変換したテクスチャが、シェーダーの許容範囲に収まっているかを調べる |
 | `tools/README.md` | ツールの使い方、入力画像の描き方、チャンネルの割り当て、シェーダーへの組み込み方 |
 | `tools/sample/input/` | サンプルの入力画像 (横 2048 × 縦 1024、上下左右につながる街) |
 | `demo/city_polytile.html` | ブラウザで開けるデモ (テクスチャ埋め込み済み、WebGL2) |

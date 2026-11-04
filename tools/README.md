@@ -187,6 +187,38 @@ city_bake.run([
 Houdini の画面の中で実行すると、計算が終わるまで (numpy だけなら 1 分ほど) 操作が止まります。
 大きなマップは hython か TOPs で回すのがおすすめです。
 
+## PNG から ASTC 4x4 への変換
+
+タイルごとの PNG を 1 枚ずつ変換します (マップ全体を変換してから切り出すと、ブロックの位置がそろいません)。
+astcenc の場合 (ARM の公式エンコーダー):
+
+```
+# 値をそのまま読むもの:リニア (-cl) で変換する。sRGB (-cs) にしないこと
+astcenc -cl tileA_data.png    tileA_data.astc    4x4 -medium
+astcenc -cl tileA_cone.png    tileA_cone.astc    4x4 -medium
+astcenc -cl tileA_outline.png tileA_outline.astc 4x4 -medium
+# 色:sRGB (-cs) でよい
+astcenc -cs tileA_roof.png    tileA_roof.astc    4x4 -medium
+astcenc -cs tileA_ground.png  tileA_ground.astc  4x4 -medium
+```
+
+- data / cone / outline に `-perceptual`、`-normal`、`-esw` (チャンネルの入れ替え)、α の重み付けなどは付けません。
+- `-fast` でも許容範囲に収まります (サンプルで確認)。`-fastest` は誤差が増えるので、使う場合は下の確認をしてください。
+- エンジンに読み込む時も、data / cone / outline は sRGB をオフ (リニア) にします。
+  sRGB で読まれると高さが大きくずれ (サンプルで最大 73 コード)、壁の向き・AO・影の判定が乱れます。
+
+**変換結果の確認**:ASTC を PNG に戻して、`astc_check.py` で元の PNG と比べます。
+
+```
+astcenc -dl tileA_data.astc tileA_data_dec.png
+python3 astc_check.py --kind data    --orig tileA_data.png    --decoded tileA_data_dec.png
+python3 astc_check.py --kind cone    --orig tileA_cone.png    --decoded tileA_cone_dec.png
+python3 astc_check.py --kind outline --orig tileA_outline.png --decoded tileA_outline_dec.png
+```
+
+高さ・距離・円錐・輪郭がシェーダーの許容範囲に収まっているかを OK / NG で表示します。
+全体が一方向にずれている場合は、sRGB で変換・復元している可能性を知らせます。
+
 ## ノイズが出る時の切り分け
 
 関数の中の `DEBUG_VIEW` を変えると、入力をそのまま表示できます (デモでは「デバッグ表示」)。
