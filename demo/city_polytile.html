@@ -433,7 +433,22 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
             highp vec4 d = texelFetch(uCityData, ivec2(clamp(floor((hit.xy - n * 0.5) * dSc), vec2(0.0), dRes - 1.0)), 0);
             d.rg = mix(d.rg, round(d.rg * 63.75) / 63.75, SNAP);
             highp float bot = d.r * heightTex, top = d.g * heightTex;
-            highp vec2 wuv = (hit.xy - n * 2.0) / S;                                     // 壁の色は建物の内側に置いてある
+            // 壁の色は建物の内側に置いてある (ground では輪郭より 1.5 テクセル以上内側)。
+            // 境目の近くで読むと、線形補間や ASTC のブロックで地面の色が混ざるので、できるだけ深く読む。
+            // 深さ 5 → 3.5 → 2.5 テクセルの順に試し、同じ建物の中で、境界から 3 テクセル以上離れた所を使う
+            // (細い建物や角では浅い所しか取れないので、取れる一番深い所)
+            // 角では法線の向きだけだと隣の面の境界に近いので、視線の進む向き (建物の奥へ向かう) も試す
+            highp vec2 wq = hit.xy - n * 2.0;
+            highp vec2 fwd = normalize(D.xy);
+            for (int k = 0; k < 6; k++) {
+                highp float dep = (k % 3) == 0 ? 5.0 : (k % 3) == 1 ? 3.5 : 2.5;
+                highp vec2 q = hit.xy + (k < 3 ? -n : normalize(fwd - n)) * dep;
+                highp vec4 e = texelFetch(uCityData, ivec2(clamp(floor(q * dSc), vec2(0.0), dRes - 1.0)), 0);
+                e.rg = mix(e.rg, round(e.rg * 63.75) / 63.75, SNAP);
+                bool same = all(lessThan(abs(e.rg - d.rg), vec2(KEY_TOL)));
+                if (same && e.b * DIST_TEX >= 2.0) { wq = q; break; }   // B は 1 テクセル小さめに作ってあるので 2 = 境界から 3 テクセル
+            }
+            highp vec2 wuv = wq / S;
             col = bot > 0.0 ? textureLod(uCityRoof, wuv, 0.0).rgb * 0.6              // 高架の床の側面
                             : textureLod(uCityGround, wuv, 0.0).rgb;
             highp float shade = 0.85;
