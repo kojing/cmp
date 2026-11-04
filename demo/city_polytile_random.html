@@ -241,6 +241,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
         return vec4(vec3(v), 1.0);
     }
     int stepsUsed = 0;
+    bool sameTop = false;               // 入った所と、その直前の点の真下が同じ建物か (段のある建物の判定)
     bool starved = false;                       // マージンが足りず、視線の始まりがテクスチャの外
     highp vec3 col;
     {
@@ -289,11 +290,15 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
                         if (inside) inside = textureLod(uCityOutline, q.xy / S, 0.0).r > 0.5;
                         if (inside) tB = tm; else tA = tm;
                     }
-                    // 入る直前の点の真下が建物 (屋根より上) なら屋根の面から、そうでなければ側面から入った
+                    // 入る直前の点の真下が建物 (屋根より上) で、入った所も同じ建物なら屋根の面から、そうでなければ側面から入った
+                    // (段のある建物:低い部分の屋根の上から高い部分の側面に入った時は「側面」)
                     highp vec3 qa = eye + D * tA;
                     highp vec4 ea = texelFetch(uCityData, ivec2(clamp(floor((qa.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
                     ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
-                    if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityOutline, (qa.xy) / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
+                    { highp vec4 eb = texelFetch(uCityData, ivec2(clamp(floor((eye.xy + D.xy * tB) * dSc), vec2(0.0), dRes - 1.0)), 0);
+                      eb.rg = mix(eb.rg, round(eb.rg * 63.75) / 63.75, SNAP);
+                      sameTop = all(lessThan(abs(eb.rg - ea.rg), vec2(KEY_TOL))); }
+                    if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && sameTop && textureLod(uCityOutline, (qa.xy) / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
                     else                                           { face = 3; hit = eye + D * tB; }
                     break;
                 }
@@ -345,7 +350,10 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
                 highp vec3 qa = eye + D * tA;
                 highp vec4 ea = texelFetch(uCityData, ivec2(clamp(floor((qa.xy) * dSc), vec2(0.0), dRes - 1.0)), 0);
                 ea.rg = mix(ea.rg, round(ea.rg * 63.75) / 63.75, SNAP);
-                if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && textureLod(uCityOutline, qa.xy / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
+                { highp vec4 eb = texelFetch(uCityData, ivec2(clamp(floor((eye.xy + D.xy * tB) * dSc), vec2(0.0), dRes - 1.0)), 0);
+                      eb.rg = mix(eb.rg, round(eb.rg * 63.75) / 63.75, SNAP);
+                      sameTop = all(lessThan(abs(eb.rg - ea.rg), vec2(KEY_TOL))); }
+                    if (ea.r < EMPTY_R && qa.z > ea.g * heightTex && sameTop && textureLod(uCityOutline, qa.xy / S, 0.0).r > 0.5) { face = 2; hit = eye + D * (1.0 - ea.g * heightTex / eye.z); }
                 else { face = 3; hit = eye + D * tB; }
             }
         }
