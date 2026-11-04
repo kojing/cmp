@@ -17,6 +17,7 @@
 | `tools/astc_check.py` | ASTC に変換したテクスチャが、シェーダーの許容範囲に収まっているかを調べる |
 | `tools/README.md` | ツールの使い方、入力画像の描き方、チャンネルの割り当て、シェーダーへの組み込み方 |
 | `tools/sample/input/` | サンプルの入力画像 (横 2048 × 縦 1024、上下左右につながる街) |
+| `textures_random/` | 以前のランダム配置の街の意匠で作った 4 タイル (コア 2048) と、`demo/city_polytile_random.html` |
 | `demo/city_polytile.html` | ブラウザで開けるデモ (テクスチャ埋め込み済み、WebGL2) |
 | `docs/tile*_textures.png` | サンプルのタイル A / B のテクスチャを、チャンネルごとに並べた図 |
 | `dev/` | サンプルの街の生成と、ASTC の検証に使ったスクリプト |
