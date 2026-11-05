@@ -59,7 +59,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     // ---- 調整する値 (シーンに合わせてここを書き換える) ----
     highp float FOV_DEG      = 20.0;    // 画角 (度)。視点の高さ = 画面の高さ ÷ 2 ÷ tan(画角 ÷ 2)
     highp float EYE_OFFSET   = -0.4;    // 視点の真下の位置 (画面中央からの縦のずれ、画面の半分 = 1)
-    highp float HEIGHT_SCALE = 0.25;    // 建物の高さ:G = 255 のときの高さ ÷ CONE_MAP_W
+    highp float HEIGHT_SCALE = 0.125;   // 建物の高さ:G = 255 のときの高さ ÷ CONE_MAP_W
     highp float LIGHT_AZ_DEG = 241.0;   // 光の方位 (度、0 = ポリゴン UV の +u、90 = +v)
     highp float LIGHT_EL_DEG = 65.0;    // 光の高さ (度、地面からの角度)
     bool  DROP_SHADOW  = true;    // 落ち影 (地面だけ)
@@ -77,8 +77,8 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     // ポリゴン UV 0..1 が、テクスチャのうちマージンを除いた TEX_CORE の範囲に対応する。
     // 単位は「テクセル」だが、実際のテクスチャの解像度とは別に決めてよい
     // (実際の解像度が違っても、TEX_SIZE 全体に引き伸ばして読む。高さ・距離・円錐もこの単位で扱う)
-    highp float TEX_CORE     = 1024.0;  // ポリゴンに映る範囲 (マージンを除いた大きさ)
-    highp float TEX_SIZE     = 1408.0;  // マージン込みのテクスチャ全体の大きさ (= TEX_CORE + 2 × 片側マージン)
+    highp float TEX_CORE     = 2048.0;  // ポリゴンに映る範囲 (マージンを除いた大きさ)
+    highp float TEX_SIZE     = 2432.0;  // マージン込みのテクスチャ全体の大きさ (= TEX_CORE + 2 × 片側マージン)
 
     // ---- 画面とポリゴンの大きさ (省略可) ----
     // 0 のままなら UV の画面上の微分から求める。UV の精度が低い (16bit) と微分が乱れる。
@@ -93,7 +93,7 @@ highp vec4 cityTile(highp vec2 screenUV, highp vec2 polyUV)
     // ---- 定数 (タイルの作り方に合わせる。city_bake.py の出力に表示される値) ----
     const highp float DIST_SCALE   = 2.0;            // data の B が 1 テクセルあたりいくつ増えるか
     highp float DIST_TEX     = 255.0 / DIST_SCALE;            // B = 1 のときの距離 (data のテクセル)
-    const highp float CONE_MAP_W   = 2048.0;         // 円錐マップを作ったマップ全体の幅 (マッピングの単位)
+    const highp float CONE_MAP_W   = 4096.0;         // 円錐マップを作ったマップ全体の幅 (マッピングの単位)
     const int   STEPS        = 160;
     const int   SHADOW_STEPS = 96;
     const highp float EPS          = 0.6;            // 境界を越える最小の歩幅 (テクセル)

@@ -19,4 +19,5 @@
 | `tile?_outline.png` | `uCityOutline` | 1 チャンネル。一番近い境界までの距離 (外側の輪郭と段の境目、2 テクセルで 255) | ミップなし、リニア (texelFetch で読む) |
 
 ラップはどれも CLAMP。シェーダーの値は `TEX_CORE = 1024`、`TEX_SIZE = 1408`、`DIST_SCALE = 2`、`CONE_MAP_W = 2048` です。
+(`shader/city_tile_fn.glsl` の初期値は `textures_random/` 用なので、このテクスチャで使う時は `TEX_CORE` / `TEX_SIZE` / `CONE_MAP_W` と `HEIGHT_SCALE = 0.25` に書き換えます)
 デモではこのテクスチャを 1 枚 2000 × 2000 のポリゴンに貼っています (ズーム 1 で 1 テクセル ≒ 1.95 ピクセル)。
