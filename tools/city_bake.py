@@ -20,7 +20,7 @@ city_bake.py ― 高さの画像と建物マスクから、cityTile() 用の各�
                 境界は外側の輪郭と段の境目の両方。シェーダーが高さごとに符号を付けて輪郭にする
   cone.png      円錐ステップ値 (半分の解像度)             → cone テクスチャ (R8)
   wall_mask.png 地面テクスチャに壁の色を置く範囲 (白)     → ground の RGB を作るときの目安
-  roof_RGB.png  建物の外を埋めた屋根の色 (--roof のとき)  → roof テクスチャの RGB
+  roof_RGB.png  屋根の色。縁と建物の外を内側の色で埋めたもの (--roof のとき) → roof テクスチャの RGB
   bake_info.txt シェーダーの定数に入れる値
 
   --core と --margin を渡すと、各画像をタイルに切り出したもの (tiles/タイル名_*.png) も作る。
@@ -236,7 +236,16 @@ def load_gray(path):
 
 
 def pad(a, p, wrap):
-    return np.pad(a, p, mode='wrap' if wrap else 'edge')
+    """wrap: True = そのまま繰り返す、'mirror' = 鏡に映して繰り返す、False = 端を伸ばす"""
+    return np.pad(a, p, mode='symmetric' if wrap == 'mirror' else 'wrap' if wrap else 'edge')
+
+
+def wrap_idx(i, n, wrap):
+    """マップの外の添字を、マップの中に戻す (pad と同じつながり方)"""
+    if wrap == 'mirror':
+        j = i % (2 * n)
+        return np.where(j >= n, 2 * n - 1 - j, j)
+    return i % n if wrap else np.clip(i, 0, n - 1)
 
 
 def fine_sdf(cov, wrap, up=4, chunk=512, limit=4.0):
@@ -276,8 +285,7 @@ def tier_dist(topq, botq, N, wrap, limit=2.0, chunk=256):
         for x0 in range(0, W, chunk):
             h = min(chunk, H - y0); w = min(chunk, W - x0)
             ys = np.arange(y0 * N - P, (y0 + h) * N + P); xs = np.arange(x0 * N - P, (x0 + w) * N + P)
-            ys = ys % Hh if wrap else np.clip(ys, 0, Hh - 1)
-            xs = xs % Wh if wrap else np.clip(xs, 0, Wh - 1)
+            ys = wrap_idx(ys, Hh, wrap); xs = wrap_idx(xs, Wh, wrap)
             t = topq[np.ix_(ys, xs)]; b = botq[np.ix_(ys, xs)]
             key = np.where(t > 0, b * 256 + t, -1)
             edge = np.zeros(key.shape, bool)
@@ -299,16 +307,22 @@ def tier_dist(topq, botq, N, wrap, limit=2.0, chunk=256):
     return out
 
 
+def nearest_idx(valid, wrap, P=64):
+    """各画素から一番近い valid の画素の添字 (iy, ix)"""
+    H, W = valid.shape
+    vp = pad(valid, P, wrap)
+    _, (iy, ix) = edt(~vp, return_indices=True)
+    iy = iy[P:P + H, P:P + W] - P; ix = ix[P:P + H, P:P + W] - P
+    return wrap_idx(iy, H, wrap), wrap_idx(ix, W, wrap)
+
+
 def nearest_fill(values, valid, wrap, P=64):
     """valid でない所を、一番近い valid の値で埋める"""
     H, W = valid.shape
     vp = pad(valid, P, wrap)
     _, (iy, ix) = edt(~vp, return_indices=True)
     iy = iy[P:P + H, P:P + W] - P; ix = ix[P:P + H, P:P + W] - P
-    if wrap:
-        iy %= H; ix %= W
-    else:
-        iy = np.clip(iy, 0, H - 1); ix = np.clip(ix, 0, W - 1)
+    iy = wrap_idx(iy, H, wrap); ix = wrap_idx(ix, W, wrap)
     out = values.copy()
     m = ~valid
     out[m] = values[iy[m], ix[m]]
@@ -325,6 +339,7 @@ def main(argv=None):
     ap.add_argument('--ground', help='地面と壁の色 (RGB)。渡すとタイルに切り出す (中身は変えない)')
     ap.add_argument('--out', default='baked')
     ap.add_argument('--wrap', action='store_true', help='マップが上下左右にそのまま繰り返してつながる (距離をまたいで計算する)')
+    ap.add_argument('--mirror', action='store_true', help='マップが上下左右に鏡に映して繰り返してつながる (出力も鏡に映して並べれば、そのまま繰り返すマップになる)')
     ap.add_argument('--dist-scale', type=float, default=2.0, help='B が 1 テクセルあたりいくつ増えるか (既定 2 → 最大 127.5 テクセル)')
     ap.add_argument('--scale', type=int, default=1, help='--mask がない時の top / bottom の倍率 (mask がある時は大きさの比から決める)')
     ap.add_argument('--upsample', type=int, default=4, help='輪郭を求めるときの拡大率 (既定 4)')
@@ -333,6 +348,8 @@ def main(argv=None):
     ap.add_argument('--core', type=int, help='タイルのコアの幅 (テクセル)。渡すとタイルに切り出す')
     ap.add_argument('--margin', type=int, default=0, help='タイルの片側マージン (テクセル)')
     a = ap.parse_args(argv)
+    if a.mirror:
+        a.wrap = 'mirror'
     print('計算:', 'scipy + Pillow' if BACKEND == 'scipy' else 'numpy だけ (scipy / Pillow なし)')
     os.makedirs(a.out, exist_ok=True)
 
@@ -441,8 +458,27 @@ def main(argv=None):
         if rc.shape[2] == 1: rc = np.repeat(rc, 3, axis=2)
         if rc.shape[:2] != (H, W):
             sys.exit('roof の大きさが top と違います')
-        inside = sd < 0.0
-        filled = np.stack([nearest_fill(rc[..., c], inside, a.wrap) for c in range(3)], -1)
+        # 境界の近く (1.5 テクセル以内) の色は、同じ領域 (同じ高さ) の内側の一番近い色に置き換える。
+        # 描いた屋根の色の縁は輪郭とずれていたり (階段・縮小のにじみ)、段の境目で隣の屋根の色が混ざったりするため。
+        # 建物の外は、一番近い屋根の色で埋める (ミップと ASTC で縁がにじまないように)
+        # (領域は屋根の高さ G で分ける。高架の床と柱のように屋根の高さが同じなら、上から見える屋根は 1 枚なので分けない)
+        filled = rc.copy()
+        core = np.zeros((H, W), bool)
+        Pg = 4
+        for g in np.unique(G[solid]):
+            m = solid & (G == g)
+            dg = edt(pad(m, Pg, a.wrap))[Pg:Pg + H, Pg:Pg + W]          # 屋根の高さが変わる所までの距離 (中心どうし)
+            core |= m & (dg >= 2.0) & (sd <= -1.5)
+        for g in np.unique(G[solid]):
+            m = solid & (G == g)
+            src = m & core
+            if not src.any():
+                continue
+            iy, ix = nearest_idx(src, a.wrap)
+            t = m & ~core
+            filled[t] = rc[iy[t], ix[t]]
+        iy, ix = nearest_idx(core if core.any() else solid, a.wrap)
+        filled[~solid] = filled[iy[~solid], ix[~solid]]
         outs['roof_RGB'] = filled
 
     if a.ground:
@@ -477,8 +513,7 @@ def main(argv=None):
         def cut(img, ox, oy, s, f=1):
             hh, ww = img.shape[:2]
             ys = np.arange(oy // f, oy // f + s // f); xs = np.arange(ox // f, ox // f + s // f)
-            ys = ys % hh if a.wrap else np.clip(ys, 0, hh - 1)
-            xs = xs % ww if a.wrap else np.clip(xs, 0, ww - 1)
+            ys = wrap_idx(ys, hh, a.wrap); xs = wrap_idx(xs, ww, a.wrap)
             return img[np.ix_(ys, xs)]
         for j in range(H // C):
             for i in range(W // C):

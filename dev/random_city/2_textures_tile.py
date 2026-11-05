@@ -19,16 +19,49 @@ def half_mean(a): return a.reshape(OUT, 2, OUT, 2).mean(axis=(1, 3))
 def half_pick(a):                                   # 2×2 の中で建物が一番多い値 (高さを混ぜない)
     b = a.reshape(OUT, 2, OUT, 2).transpose(0, 2, 1, 3).reshape(OUT, OUT, 4)
     return np.max(b, axis=2)
-cov = half_mean(solid.astype(np.float32))           # アンチエイリアスつきの建物マスク (0, .25, .5, .75, 1)
+# 配置 (N = 4096) は画素で作った形なので、そのままだと縁が 1 画素単位の階段になる。
+# 領域 (建物・高架の床・柱) ごとに符号付き距離を作って少しぼかし、なめらかな形に直してから使う
+#   mask      : 出力 (2048) の解像度。ぼかした距離から作るアンチエイリアス (256 段階)
+#   top4x / bottom4x : 出力の 4 倍 (8192)。領域ごとのぼかした距離を 2 倍に補間して、一番内側の領域を選ぶ
+#   (マップは鏡に映して繰り返すので、端の外は鏡に映した形として扱う)
+import os; os.makedirs('input', exist_ok=True)
+SIG = 1.0                                           # ぼかし (N の画素)
+def refl(i, n):
+    j = i % (2 * n); return np.where(j >= n, 2 * n - 1 - j, j)
+def sdist(m):                                       # 画素の中心の符号付き距離 (内側が負、N の画素)
+    return np.where(m, 0.5 - ndimage.distance_transform_edt(m), ndimage.distance_transform_edt(~m) - 0.5)
+rid = np.zeros((N, N), np.int32)
+KEYS = {}
+for i, h in H.items(): rid[label == i] = i; KEYS[i] = (0, h)
+RD, PL = max(H) + 1, max(H) + 2
+rid[road] = RD; KEYS[RD] = (56, 72)
+rid[pillar] = PL; KEYS[PL] = (0, 72)
+# 外側の輪郭 (mask):建物全体の距離をぼかし、テクセルの中心 (2×2 の画素の真ん中) で読む
+sdu = ndimage.gaussian_filter(sdist(rid > 0), SIG, mode='mirror')
+cov = np.clip(0.5 - half_mean(sdu) / 2, 0, 1)
+UP = 2                                              # N の画素 → 4 倍の解像度 (8192)
+best = np.full((N * UP, N * UP), 0.0, np.float32)    # 0 より小さい (内側) ものだけ採る
+keyhi = np.zeros((N * UP, N * UP), np.int32)
+PADR = 8
+for r, (kb, kt) in KEYS.items():
+    ys_, xs_ = np.nonzero(rid == r)
+    if len(ys_) == 0: continue
+    y0, y1, x0, x1 = ys_.min(), ys_.max() + 1, xs_.min(), xs_.max() + 1
+    yy = refl(np.arange(y0 - PADR, y1 + PADR), N); xx = refl(np.arange(x0 - PADR, x1 + PADR), N)
+    sd = ndimage.gaussian_filter(sdist(rid[np.ix_(yy, xx)] == r), SIG, mode='nearest')
+    hi = ndimage.zoom(sd, UP, order=1, grid_mode=True, mode='nearest')[PADR * UP:-PADR * UP, PADR * UP:-PADR * UP]
+    sl = (slice(y0 * UP, y1 * UP), slice(x0 * UP, x1 * UP))
+    bsub = best[sl]; better = hi < bsub
+    bsub[better] = hi[better]; keyhi[sl][better] = kb * 256 + kt
+    del sd, hi
+Image.fromarray((cov * 255 + 0.5).astype(np.uint8)).save('input/mask.png')
+Image.fromarray((keyhi & 255).astype(np.uint8)).save('input/top4x.png')
+Image.fromarray((keyhi >> 8).astype(np.uint8)).save('input/bottom4x.png')
+del best, keyhi, sdu
 top = half_pick(np.where(solid, data[..., 1], 0))
 bot = half_pick(np.where(solid & (data[..., 0] > 0), data[..., 0], 0))
-import os; os.makedirs('input', exist_ok=True)
-Image.fromarray((cov * 255 + 0.5).astype(np.uint8)).save('input/mask.png')
 Image.fromarray(top.astype(np.uint8)).save('input/top.png')
 Image.fromarray(bot.astype(np.uint8)).save('input/bottom.png')
-# 2 倍の解像度の top / bottom (段の輪郭をテクセルより細かくするため。mask は 1 倍のまま)
-Image.fromarray(np.where(solid, data[..., 1], 0).astype(np.uint8)).save('input/top2x.png')
-Image.fromarray(np.where(solid & (data[..., 0] > 0), data[..., 0], 0).astype(np.uint8)).save('input/bottom2x.png')
 print('input ok')
 
 # ---------------- 屋根 ----------------
